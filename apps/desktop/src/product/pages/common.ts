@@ -1,0 +1,10 @@
+import type { NodeView, Slot } from "../types";
+export const stateLabel:Record<string,string>={active:"运行中",orphaned:"节点已消失",unbound:"未绑定",blocked:"已阻断",error:"异常"};
+export const stateTone=(state:string)=>state==="active"?"success" as const:state==="unbound"?"neutral" as const:state==="orphaned"?"danger" as const:"warning" as const;
+export const copy=(value:string)=>navigator.clipboard.writeText(value);
+export const groupNodes=(items:NodeView[])=>{const groups=new Map<string,{id:string;name:string;nodes:NodeView[]}>();for(const node of items){const id=node.subscriptionId||"unknown";const group=groups.get(id)??{id,name:node.subscriptionName||"未知订阅",nodes:[]};group.nodes.push(node);groups.set(id,group)}return [...groups.values()].sort((a,b)=>a.name.localeCompare(b.name,"zh-CN"))};
+export type ProxyExportFormat="adspower"|"socks5"|"hostport";
+const cleanRemark=(value:string)=>value.replace(/[{}\r\n]/g," ").replace(/\s+/g," ").trim();
+export const proxyRemark=(slot:Slot)=>cleanRemark(slot.name||slot.nodeName||("Slot "+slot.port))||("Slot "+slot.port);
+export const formatProxy=(slot:Slot,format:ProxyExportFormat,includeRemark=true)=>{const address="127.0.0.1:"+slot.port;if(format==="hostport")return address;const uri="socks5://"+address;return format==="adspower"&&includeRemark?uri+"{"+proxyRemark(slot)+"}":uri};
+export const formatProxies=(slots:Slot[],format:ProxyExportFormat,includeRemark=true)=>slots.map(slot=>formatProxy(slot,format,includeRemark)).join("\n");

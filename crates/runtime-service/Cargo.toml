@@ -1,0 +1,22 @@
+[package]
+name = "node2socks-runtime-service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+node2socks-core-adapter = { path = "../core-adapter" }
+node2socks-domain = { path = "../domain" }
+node2socks-slot-manager = { path = "../slot-manager" }
+reqwest.workspace = true
+serde.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+tokio-util = "0.7.16"
+uuid.workspace = true
+
+[dev-dependencies]
+node2socks-storage = { path = "../storage" }
+tempfile.workspace = true

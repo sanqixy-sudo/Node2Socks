@@ -1,0 +1,32 @@
+# Concept-only config used for Node2Socks POC.
+# Verify all fields against the pinned Mihomo version before release.
+
+allow-lan: false
+external-controller: 127.0.0.1:19090
+secret: CHANGE_AT_RUNTIME
+
+
+proxy-providers:
+  sub-a:
+    type: http
+    url: http://127.0.0.1:17890/provider/sub-a?token=LOCAL_TOKEN
+    path: ./providers/sub-a.yaml
+    interval: 86400
+    override:
+      additional-prefix: "[a1b2] "
+
+proxy-groups:
+  - name: slot-001
+    type: select
+    proxies: [REJECT]
+    default-selected: REJECT
+    empty-fallback: REJECT
+    use: [sub-a]
+
+listeners:
+  - name: slot-001-in
+    type: socks
+    listen: 127.0.0.1
+    port: 21001
+    proxy: slot-001
+    udp: true

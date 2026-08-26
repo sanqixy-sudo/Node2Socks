@@ -1,0 +1,16 @@
+services:
+  node2socks-cloud:
+    build:
+      context: ../..
+      dockerfile: services/cloud/Dockerfile
+    container_name: node2socks-cloud
+    ports:
+      - "127.0.0.1:18080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

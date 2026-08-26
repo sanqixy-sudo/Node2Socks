@@ -1,0 +1,25 @@
+[package]
+name = "node2socks-cloud"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+argon2 = "0.5.3"
+base64 = "0.23.1"
+jsonwebtoken = "9.3.1"
+rand.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+uuid.workspace = true
+[dev-dependencies]
+serde_json.workspace = true
+tower = { version = "0.5.2", features = ["util"] }

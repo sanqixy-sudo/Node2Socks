@@ -1,0 +1,15 @@
+Copyright (c) 2026 Node2Socks contributors
+All rights reserved.
+
+The source code in this repository is made publicly available for viewing,
+security review, and issue reporting. No permission is granted to copy,
+modify, distribute, sublicense, or sell this software except with prior
+written permission from the copyright holder.
+
+Third-party components and materials remain subject to their respective
+licenses. In particular, Mihomo is distributed separately under
+GPL-3.0-or-later; see sidecar/LICENSES/MIHOMO_NOTICE.md.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.

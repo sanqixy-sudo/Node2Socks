@@ -1,0 +1,20 @@
+{
+  "generated_for": "Node2Socks",
+  "generated_date": "2026-08-26",
+  "references": [
+    {
+      "name": "Clash Verge Rev",
+      "url": "https://github.com/clash-verge-rev/clash-verge-rev",
+      "included": "architecture notes and fetch script",
+      "license": "GPL-3.0"
+    },
+    {
+      "name": "Mihomo",
+      "url": "https://github.com/MetaCubeX/mihomo",
+      "version": "v1.19.30",
+      "included": "official license notice, capability notes and checksum",
+      "license": "GPL-3.0-or-later",
+      "windows_amd64_sha256": "22c09fd67673895ef7cd6b1820563918275c3d316f2462b306208675118db3c0"
+    }
+  ]
+}

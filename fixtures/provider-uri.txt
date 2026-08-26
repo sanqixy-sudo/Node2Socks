@@ -1,0 +1,3 @@
+# Fake fixtures only. Do not expect connectivity.
+vless://00000000-0000-0000-0000-000000000001@example.invalid:443?encryption=none&security=tls&type=tcp#JP-Test-01
+trojan://test-password@example.invalid:443?security=tls#US-Test-01

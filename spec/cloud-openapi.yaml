@@ -1,0 +1,393 @@
+openapi: 3.1.0
+info:
+  title: Node2Socks Cloud API
+  version: 1.0.0
+  description: Optional encrypted configuration synchronization API. It never carries proxy traffic.
+servers:
+  - url: https://sync.example.com
+paths:
+  /healthz:
+    get:
+      operationId: healthz
+      security: []
+      responses:
+        '200':
+          description: Service is live
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /api/v1/server-info:
+    get:
+      operationId: serverInfo
+      security: []
+      responses:
+        '200':
+          description: Server compatibility metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerInfo'
+  /api/v1/auth/register:
+    post:
+      operationId: register
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/TokenResponse'
+        '400':
+          $ref: '#/components/responses/ApiError'
+        '409':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/auth/login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/TokenResponse'
+        '401':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/auth/refresh:
+    post:
+      operationId: refreshTokens
+      security: []
+      description: Rotates a valid refresh token; the submitted token becomes invalid.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshRequest'
+      responses:
+        '200':
+          $ref: '#/components/responses/TokenResponse'
+        '401':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/auth/logout:
+    post:
+      operationId: logout
+      responses:
+        '204':
+          description: All refresh tokens for the current device were revoked
+        '401':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/auth/change-password:
+    post:
+      operationId: changePassword
+      description: Atomically changes the password, stores a rewrapped Vault envelope, and revokes refresh tokens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '204':
+          description: Password and Vault envelope updated
+        '400':
+          $ref: '#/components/responses/ApiError'
+        '401':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/devices:
+    get:
+      operationId: listDevices
+      responses:
+        '200':
+          description: Active devices for the authenticated account
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Device'
+        '401':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/devices/{id}:
+    delete:
+      operationId: revokeDevice
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Device and its refresh tokens revoked
+        '401':
+          $ref: '#/components/responses/ApiError'
+        '404':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/vault:
+    get:
+      operationId: getVault
+      responses:
+        '200':
+          description: Password-wrapped Vault key envelope
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VaultEnvelope'
+        '401':
+          $ref: '#/components/responses/ApiError'
+        '404':
+          $ref: '#/components/responses/ApiError'
+    put:
+      operationId: putVault
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VaultEnvelope'
+      responses:
+        '204':
+          description: Vault envelope stored
+        '400':
+          $ref: '#/components/responses/ApiError'
+        '401':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/sync/push:
+    post:
+      operationId: pushRecords
+      description: Compare-and-swap push of up to 500 opaque encrypted records.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushRequest'
+      responses:
+        '200':
+          description: Independently accepted and conflicted records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushResponse'
+        '400':
+          $ref: '#/components/responses/ApiError'
+        '401':
+          $ref: '#/components/responses/ApiError'
+        '413':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/sync/pull:
+    get:
+      operationId: pullRecords
+      parameters:
+        - in: query
+          name: cursor
+          required: false
+          schema:
+            type: integer
+            format: uint64
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: At most 1000 encrypted delta events after the cursor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PullResponse'
+        '401':
+          $ref: '#/components/responses/ApiError'
+  /api/v1/sync/resolve:
+    post:
+      operationId: resolveConflicts
+      description: Applies explicit conflict resolutions through the same compare-and-swap contract as push.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PushRequest'
+      responses:
+        '200':
+          description: Independently accepted and still-conflicted records
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PushResponse'
+        '400':
+          $ref: '#/components/responses/ApiError'
+        '401':
+          $ref: '#/components/responses/ApiError'
+        '413':
+          $ref: '#/components/responses/ApiError'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  responses:
+    TokenResponse:
+      description: Access token, rotated refresh token, and device identity
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/TokenResponse'
+    ApiError:
+      description: Structured API error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service]
+      properties:
+        status: { type: string, const: ok }
+        service: { type: string, const: node2socks-cloud }
+    ServerInfo:
+      type: object
+      required: [service, version, api_version, registration_enabled, max_payload_bytes]
+      properties:
+        service: { type: string, const: node2socks-cloud }
+        version: { type: string }
+        api_version: { type: string, const: '1' }
+        registration_enabled: { type: boolean }
+        max_payload_bytes: { type: integer, minimum: 1 }
+    RegisterRequest:
+      type: object
+      required: [email, password, device_name, platform]
+      properties:
+        email: { type: string, format: email }
+        password: { type: string, format: password, minLength: 10 }
+        device_name: { type: string }
+        platform: { type: string }
+    LoginRequest:
+      allOf:
+        - $ref: '#/components/schemas/RegisterRequest'
+    RefreshRequest:
+      type: object
+      required: [refresh_token]
+      properties:
+        refresh_token: { type: string }
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password, vault]
+      properties:
+        current_password: { type: string, format: password }
+        new_password: { type: string, format: password, minLength: 10 }
+        vault:
+          $ref: '#/components/schemas/VaultEnvelope'
+    TokenResponse:
+      type: object
+      required: [access_token, refresh_token, expires_in, device_id]
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        expires_in: { type: integer, format: uint64 }
+        device_id: { type: string, format: uuid }
+    Device:
+      type: object
+      required: [id, name, platform, last_seen_at, current]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        platform: { type: string }
+        last_seen_at: { type: integer, format: uint64 }
+        current: { type: boolean }
+    VaultEnvelope:
+      type: object
+      required: [kdf, kdf_params_json, salt, wrapped_vault_key, nonce, version]
+      properties:
+        kdf: { type: string, const: argon2id }
+        kdf_params_json: { type: string }
+        salt: { type: string, description: Unpadded Base64 }
+        wrapped_vault_key: { type: string, description: Unpadded Base64 }
+        nonce: { type: string, description: Unpadded Base64 encoding of 12 bytes }
+        version: { type: integer, format: uint64, minimum: 1 }
+    SyncRecord:
+      type: object
+      required: [record_type, record_id, base_version, deleted, ciphertext, nonce, aad_version]
+      properties:
+        record_type: { type: string }
+        record_id: { type: string }
+        base_version: { type: integer, format: uint64, minimum: 0 }
+        deleted: { type: boolean }
+        ciphertext: { type: string, description: Unpadded Base64 opaque ciphertext }
+        nonce: { type: string, description: Unpadded Base64 encoding of 12 bytes }
+        aad_version: { type: integer, format: uint64 }
+    PushRequest:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/SyncRecord'
+    PushedRecord:
+      type: object
+      required: [record_type, record_id, version]
+      properties:
+        record_type: { type: string }
+        record_id: { type: string }
+        version: { type: integer, format: uint64 }
+    ConflictRecord:
+      type: object
+      required: [record_type, record_id, expected_version, actual_version]
+      properties:
+        record_type: { type: string }
+        record_id: { type: string }
+        expected_version: { type: integer, format: uint64 }
+        actual_version: { type: integer, format: uint64 }
+    PushResponse:
+      type: object
+      required: [accepted, conflicts, cursor]
+      properties:
+        accepted:
+          type: array
+          items:
+            $ref: '#/components/schemas/PushedRecord'
+        conflicts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConflictRecord'
+        cursor: { type: integer, format: uint64 }
+    PullEvent:
+      type: object
+      required: [cursor, record_type, record_id, version, deleted, ciphertext, nonce, aad_version]
+      properties:
+        cursor: { type: integer, format: uint64 }
+        record_type: { type: string }
+        record_id: { type: string }
+        version: { type: integer, format: uint64 }
+        deleted: { type: boolean }
+        ciphertext: { type: string, description: Unpadded Base64 opaque ciphertext }
+        nonce: { type: string, description: Unpadded Base64 encoding of 12 bytes }
+        aad_version: { type: integer, format: uint64 }
+    PullResponse:
+      type: object
+      required: [events, cursor]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/PullEvent'
+        cursor: { type: integer, format: uint64 }
+    ApiError:
+      type: object
+      required: [code, message]
+      properties:
+        code: { type: string }
+        message: { type: string }
+security:
+  - bearerAuth: []

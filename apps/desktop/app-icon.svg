@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Node2Socks">
+  <rect width="512" height="512" rx="112" fill="#295ea8"/>
+  <path d="M132 344V168h44l88 106V168h56v176h-44l-88-106v106z" fill="#fff"/>
+  <circle cx="370" cy="186" r="34" fill="#77d3bb"/>
+  <circle cx="370" cy="326" r="34" fill="#77d3bb"/>
+  <path d="M350 218v76h40v-76z" fill="#77d3bb"/>
+</svg>

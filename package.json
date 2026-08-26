@@ -1,0 +1,10 @@
+{
+  "name": "node2socks",
+  "private": true,
+  "packageManager": "pnpm@11.0.0",
+  "scripts": {
+    "build": "pnpm --filter @node2socks/desktop build",
+    "check": "pnpm --filter @node2socks/desktop check",
+    "dev": "pnpm --filter @node2socks/desktop dev"
+  }
+}

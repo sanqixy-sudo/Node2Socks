@@ -1,0 +1,30 @@
+[package]
+name = "node2socks-subscriptions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+axum.workspace = true
+base64 = "0.23.1"
+futures-util = "0.3.34"
+hex.workspace = true
+node2socks-crypto = { version = "0.1.0", path = "../crypto" }
+node2socks-domain = { version = "0.1.0", path = "../domain" }
+node2socks-storage = { version = "0.1.0", path = "../storage" }
+rand.workspace = true
+rusqlite.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml = "0.9.34"
+sha2.workspace = true
+tokio.workspace = true
+tokio-util = "0.7.16"
+tracing.workspace = true
+url = "2.5.8"
+uuid.workspace = true
+
+[dev-dependencies]
+tower = { version = "0.5.3", features = ["util"] }

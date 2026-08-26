@@ -1,0 +1,15 @@
+[package]
+name = "node2socks-diagnostics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+node2socks-domain = { path = "../domain" }
+regex = "1.12.2"
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation","Win32_NetworkManagement_IpHelper","Win32_Networking_WinSock","Win32_System_Registry"] }

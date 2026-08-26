@@ -1,0 +1,50 @@
+/target/
+**/node_modules/
+/apps/desktop/dist/
+/apps/desktop/src-tauri/gen/
+/.runtime/
+/.test-runtime/
+/references/upstream_downloads/*.zip
+/rustup-init.exe
+*.db
+*.db-shm
+*.db-wal
+*.orig
+*.rej
+# Local/private reference material (license not verified)
+/references/easy_proxies-2.0.0/
+/references/upstream_downloads/
+/docs/archive/bootstrap/
+/AGENTS.md
+
+# Downloaded Mihomo binaries are released separately and fetched by script
+/sidecar/windows-x64/*.exe
+/sidecar/windows-x64/*.zip
+
+# Local release and runtime output
+/release/
+/data/
+/runtime/
+# Secrets, local environment and credentials
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.pfx
+*.p12
+*.key
+
+# Logs, databases and generated archives/binaries
+*.log
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.zip
+*.exe
+
+# Editor and OS metadata
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+/scripts/fetch_upstream_references.ps1

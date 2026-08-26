@@ -1,0 +1,13 @@
+{
+  "note": "Selected concept snapshot only; do not use as Node2Socks config verbatim.",
+  "observed_upstream": "clash-verge-rev dev",
+  "important_pattern": {
+    "bundle.active": true,
+    "bundle.externalBin": [
+      "sidecar/verge-mihomo",
+      "sidecar/verge-mihomo-alpha"
+    ],
+    "build.frontendDist": "../dist",
+    "build.devUrl": "http://localhost:3000/"
+  }
+}
