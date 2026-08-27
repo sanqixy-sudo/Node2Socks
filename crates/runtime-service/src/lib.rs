@@ -7,6 +7,7 @@ use node2socks_slot_manager::SlotRepository;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
+    net::IpAddr,
     time::{Duration, Instant},
 };
 use tokio_util::sync::CancellationToken;
@@ -77,14 +78,29 @@ pub struct HealthResult {
 
 #[derive(Clone)]
 pub struct HealthChecker {
-    endpoint: String,
+    endpoints: Vec<String>,
     timeout: Duration,
 }
 
 impl HealthChecker {
     pub fn new(endpoint: impl Into<String>, timeout: Duration) -> Self {
         Self {
-            endpoint: endpoint.into(),
+            endpoints: vec![endpoint.into()],
+            timeout,
+        }
+    }
+
+    pub fn public_ip(timeout: Duration) -> Self {
+        Self {
+            endpoints: [
+                "https://api.ipify.org?format=json",
+                "https://api64.ipify.org?format=json",
+                "https://httpbin.org/ip",
+                "https://www.cloudflare.com/cdn-cgi/trace",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect(),
             timeout,
         }
     }
@@ -104,40 +120,97 @@ impl HealthChecker {
             .build()
             .map_err(config_error)?;
         let started = Instant::now();
-        let request = client.get(&self.endpoint).send();
-        let response = tokio::select! {response=request=>response.map_err(network_error)?,_=cancel.cancelled()=>return Err(AppError::new(ErrorCode::OperationCancelled,"health check cancelled"))};
-        let value = response
-            .error_for_status()
-            .map_err(network_error)?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(network_error)?;
-        let exit_ip = value
+        let mut failures = Vec::new();
+        for endpoint in &self.endpoints {
+            let request = client.get(endpoint).send();
+            let response = tokio::select! {
+                response = request => match response {
+                    Ok(response) => response,
+                    Err(error) => {
+                        failures.push(format!("{}: {}", endpoint_host(endpoint), error));
+                        continue;
+                    }
+                },
+                _ = cancel.cancelled() => return Err(AppError::new(ErrorCode::OperationCancelled, "health check cancelled")),
+            };
+            if !response.status().is_success() {
+                failures.push(format!(
+                    "{}: HTTP {}",
+                    endpoint_host(endpoint),
+                    response.status()
+                ));
+                continue;
+            }
+            let body = match response.text().await {
+                Ok(body) => body,
+                Err(error) => {
+                    failures.push(format!("{}: {}", endpoint_host(endpoint), error));
+                    continue;
+                }
+            };
+            if let Some((exit_ip, country)) = parse_health_body(&body) {
+                return Ok(HealthResult {
+                    latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    exit_ip,
+                    country,
+                });
+            }
+            failures.push(format!("{}: 返回未包含有效 IP", endpoint_host(endpoint)));
+        }
+        Err(AppError::new(
+            ErrorCode::NodeUnavailable,
+            format!("出口检测失败：{}", failures.join("; ")),
+        ))
+    }
+}
+
+fn endpoint_host(endpoint: &str) -> &str {
+    endpoint
+        .strip_prefix("https://")
+        .or_else(|| endpoint.strip_prefix("http://"))
+        .unwrap_or(endpoint)
+        .split('/')
+        .next()
+        .unwrap_or(endpoint)
+}
+
+fn parse_health_body(body: &str) -> Option<(String, Option<String>)> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        let raw_ip = value
             .get("ip")
             .or_else(|| value.get("origin"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                AppError::new(
-                    ErrorCode::NodeUnavailable,
-                    "health endpoint omitted exit IP",
-                )
-            })?;
-        Ok(HealthResult {
-            latency_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-            exit_ip: exit_ip.to_owned(),
-            country: value
-                .get("country")
-                .and_then(|v| v.as_str())
-                .map(ToOwned::to_owned),
-        })
+            .and_then(|value| value.as_str())?;
+        let ip = parse_ip(raw_ip)?;
+        let country = value
+            .get("country_code")
+            .or_else(|| value.get("country"))
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| value.trim().to_owned());
+        return Some((ip, country));
     }
+    let trace: std::collections::HashMap<_, _> = body
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect();
+    if let Some(ip) = trace.get("ip").and_then(|value| parse_ip(value)) {
+        let country = trace
+            .get("loc")
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+        return Some((ip, country));
+    }
+    parse_ip(body).map(|ip| (ip, None))
+}
+
+fn parse_ip(raw: &str) -> Option<String> {
+    let candidate = raw.split(',').next()?.trim();
+    candidate.parse::<IpAddr>().ok().map(|ip| ip.to_string())
 }
 
 fn config_error(error: impl std::fmt::Display) -> AppError {
     AppError::new(ErrorCode::InvalidConfiguration, error.to_string())
-}
-fn network_error(error: reqwest::Error) -> AppError {
-    AppError::new(ErrorCode::NodeUnavailable, error.to_string())
 }
 
 #[cfg(test)]

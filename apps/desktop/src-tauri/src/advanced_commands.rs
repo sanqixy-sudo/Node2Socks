@@ -752,7 +752,11 @@ fn persist_latency(path: &std::path::Path, probe: &NodeLatencyProbe) -> Result<(
     Ok(())
 }
 
-const LATENCY_TEST_URL: &str = "https://www.gstatic.com/generate_204";
+const LATENCY_TEST_URLS: &[&str] = &[
+    "https://www.gstatic.com/generate_204",
+    "https://www.google.com/generate_204",
+    "https://cp.cloudflare.com/generate_204",
+];
 const LATENCY_TIMEOUT: Duration = Duration::from_secs(5);
 const LATENCY_CONCURRENCY: usize = 6;
 
@@ -762,25 +766,30 @@ async fn probe_node_latency(
     internal_name: String,
 ) -> NodeLatencyProbe {
     let checked_at = now().unwrap_or_default();
-    match controller
-        .delay(&internal_name, LATENCY_TEST_URL, LATENCY_TIMEOUT)
-        .await
-    {
-        Ok(delay_ms) => NodeLatencyProbe {
-            node_id,
-            delay_ms: Some(delay_ms),
-            error: None,
-            checked_at,
-        },
-        Err(error) => NodeLatencyProbe {
-            node_id,
-            delay_ms: None,
-            error: Some(error.message),
-            checked_at,
-        },
+    let mut errors = Vec::new();
+    for test_url in LATENCY_TEST_URLS {
+        match controller
+            .delay(&internal_name, test_url, LATENCY_TIMEOUT)
+            .await
+        {
+            Ok(delay_ms) => {
+                return NodeLatencyProbe {
+                    node_id,
+                    delay_ms: Some(delay_ms),
+                    error: None,
+                    checked_at,
+                };
+            }
+            Err(error) => errors.push(format!("{}: {}", test_url, error.message)),
+        }
+    }
+    NodeLatencyProbe {
+        node_id,
+        delay_ms: None,
+        error: Some(format!("所有测速地址均失败：{}", errors.join("；"))),
+        checked_at,
     }
 }
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LatencyJobView {
@@ -1021,7 +1030,7 @@ pub async fn check_node(
     if binding.state != SlotBindingState::Active {
         return Err("该节点所在 Slot 当前已阻断".into());
     }
-    let health = HealthChecker::new("https://api.ipify.org?format=json", Duration::from_secs(12))
+    let health = HealthChecker::public_ip(Duration::from_secs(8))
         .check_socks(slot.local_port, &CancellationToken::new())
         .await
         .map_err(text)?;

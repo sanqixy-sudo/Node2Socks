@@ -69,27 +69,52 @@ impl MihomoController {
         timeout_duration: Duration,
     ) -> AppResult<u64> {
         let url = self.delay_url(internal_node, test_url, timeout_duration)?;
-        let value = self
-            .client
-            .get(url)
-            .bearer_auth(&self.secret)
-            .timeout(timeout_duration + Duration::from_secs(1))
-            .send()
-            .await
-            .map_err(network_error)?
-            .error_for_status()
-            .map_err(network_error)?
-            .json::<serde_json::Value>()
-            .await
-            .map_err(network_error)?;
-        value["delay"].as_u64().ok_or_else(|| {
-            AppError::new(
-                ErrorCode::CoreUnhealthy,
-                "delay response omitted a valid delay",
-            )
-        })
+        let mut last_error = None;
+        for attempt in 0..4 {
+            match self
+                .client
+                .get(url.clone())
+                .bearer_auth(&self.secret)
+                .timeout(timeout_duration + Duration::from_secs(1))
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => {
+                    let value = response
+                        .json::<serde_json::Value>()
+                        .await
+                        .map_err(network_error)?;
+                    return value["delay"].as_u64().ok_or_else(|| {
+                        AppError::new(
+                            ErrorCode::CoreUnhealthy,
+                            "delay response omitted a valid delay",
+                        )
+                    });
+                }
+                Ok(response) => {
+                    last_error = Some(format!("HTTP {}", response.status()));
+                    if response.status() != StatusCode::NOT_FOUND || attempt == 3 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(350 * (attempt + 1) as u64)).await;
+                }
+                Err(error) => {
+                    last_error = Some(error.to_string());
+                    if attempt == 3 {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+                }
+            }
+        }
+        Err(AppError::new(
+            ErrorCode::CoreUnhealthy,
+            format!(
+                "delay probe failed for {internal_node}: {}",
+                last_error.unwrap_or_else(|| "unknown error".into())
+            ),
+        ))
     }
-
     fn delay_url(
         &self,
         internal_node: &str,

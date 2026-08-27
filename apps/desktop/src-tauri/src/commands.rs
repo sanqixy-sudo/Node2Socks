@@ -317,7 +317,7 @@ pub async fn check_slot(
     if binding.state != SlotBindingState::Active {
         return Err("只有已绑定且未阻断的 Slot 可以执行链路检测".into());
     }
-    let health = HealthChecker::new("https://api.ipify.org?format=json", Duration::from_secs(12))
+    let health = HealthChecker::public_ip(Duration::from_secs(8))
         .check_socks(slot.local_port, &CancellationToken::new())
         .await
         .map_err(text)?;
@@ -427,9 +427,10 @@ pub(crate) async fn start_core_inner(state: &ProductState) -> Result<u32, String
     let health = manager.start().await.map_err(text)?;
     let pid = health.pid.ok_or_else(|| "Core PID 不可用".to_owned())?;
     let monitor = manager.clone().spawn_crash_monitor(Duration::from_secs(1));
-    *state.core.lock().await = Some(manager);
+    *state.core.lock().await = Some(manager.clone());
     *state.crash_monitor.lock().await = Some(monitor);
     state.core_running.store(true, Ordering::Relaxed);
+    restore_slot_selectors(state, &manager).await;
     Ok(pid)
 }
 #[tauri::command]
@@ -448,6 +449,70 @@ pub(crate) async fn stop_core_inner(state: &ProductState) -> Result<(), String> 
     Ok(())
 }
 
+/// Restore persisted Slot selections after a Core restart. Mihomo does not
+/// retain selector state across processes, so healthy Slots must be selected
+/// again after providers finish loading.
+async fn restore_slot_selectors(state: &ProductState, manager: &Arc<MihomoManager>) {
+    let repository = match slot_repository(state) {
+        Ok(repository) => repository,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load Slots while restoring selectors");
+            return;
+        }
+    };
+    let nodes = match subscription_repository(state)
+        .and_then(|repository| repository.nodes().map_err(text))
+    {
+        Ok(nodes) => nodes,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load nodes while restoring selectors");
+            return;
+        }
+    };
+    let by_id: HashMap<_, _> = nodes.into_iter().map(|node| (node.id, node)).collect();
+    let controller = match manager.controller().await {
+        Ok(controller) => controller,
+        Err(error) => {
+            tracing::warn!(%error, "failed to connect to Core while restoring selectors");
+            return;
+        }
+    };
+    let bindings = match repository.list() {
+        Ok(bindings) => bindings,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load bindings while restoring selectors");
+            return;
+        }
+    };
+    for (slot, binding) in bindings {
+        let Some(node_id) = binding.node_id else {
+            continue;
+        };
+        let Some(node) = by_id.get(&node_id).filter(|node| node.present) else {
+            continue;
+        };
+        let selector = slot_selector_name(slot.id);
+        for attempt in 0..5 {
+            match controller.select(&selector, &node.internal_name).await {
+                Ok(()) => {
+                    if let Ok(selected) = controller.selected(&selector).await {
+                        if selected != node.internal_name {
+                            tracing::warn!(%selector, expected=%node.internal_name, actual=%selected, "Core selected a different proxy");
+                        }
+                    }
+                    break;
+                }
+                Err(error) if attempt < 4 => {
+                    tracing::debug!(%error, %selector, attempt, "waiting for provider proxy before restoring selector");
+                    tokio::time::sleep(Duration::from_millis(300 * (attempt + 1) as u64)).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %selector, "failed to restore persisted Slot selector")
+                }
+            }
+        }
+    }
+}
 pub(crate) async fn rebuild_core(state: &ProductState) -> Result<(), String> {
     stop_core_inner(state).await?;
     start_core_inner(state).await?;
