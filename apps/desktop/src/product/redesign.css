@@ -99,3 +99,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 @media(max-width:1000px){.cloud-summary{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-layout>nav button{text-align:center}.table-toolbar{flex-wrap:wrap}.selection-actions{margin-left:0}.subscription-group-head{grid-template-columns:minmax(0,1fr) auto}}
 @media(max-width:850px){.command-strip{padding:0 14px}.page-header{flex-wrap:wrap}.page-actions{width:100%;justify-content:flex-start}.table-toolbar>select{flex:1 1 130px}.slot-toolbar .selection-actions{width:100%}.subscription-group-head>.btn{font-size:0}.subscription-group-head>.btn svg{margin:0}.settings-save{align-items:flex-start;flex-direction:column}.settings-save>.btn{align-self:flex-end}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;transition-duration:.01ms!important}}
+/* Final node scrolling overrides: the canvas owns vertical scrolling. */
+.content-scroll.node-canvas{overflow-y:auto;overflow-x:hidden}
+.node-canvas .content{height:auto;min-height:100%;padding-bottom:48px}
+.node-page{height:auto;min-height:100%;display:flex;flex-direction:column}
+.node-page>.section{flex:none;min-height:0;margin-bottom:12px}
+.node-page>.section>.section-body{height:auto;min-height:0;overflow:visible}
+.node-card-scroll{height:auto;overflow:visible;padding:10px;overscroll-behavior:auto}
