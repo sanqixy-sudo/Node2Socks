@@ -138,6 +138,19 @@ impl MihomoController {
         Ok(url)
     }
 
+    /// Probe a Provider node through a dedicated selector. Mihomo does not
+    /// expose Provider members under the direct delay endpoint.
+    pub async fn delay_via_selector(
+        &self,
+        selector: &str,
+        internal_node: &str,
+        test_url: &str,
+        timeout_duration: Duration,
+    ) -> AppResult<u64> {
+        self.select(selector, internal_node).await?;
+        self.delay(selector, test_url, timeout_duration).await
+    }
+
     pub async fn refresh_provider(&self, provider: &str) -> AppResult<()> {
         let response = self
             .client

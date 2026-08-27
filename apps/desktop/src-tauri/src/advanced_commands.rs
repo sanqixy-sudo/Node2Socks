@@ -10,10 +10,11 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::atomic::Ordering,
+    sync::{Arc, atomic::Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager, State};
+use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -759,20 +760,35 @@ const LATENCY_TEST_URLS: &[&str] = &[
 ];
 const LATENCY_TIMEOUT: Duration = Duration::from_secs(5);
 const LATENCY_CONCURRENCY: usize = 6;
+const LATENCY_PROBE_SELECTOR: &str = "node2socks-probe";
 
 async fn probe_node_latency(
     controller: node2socks_core_adapter::controller::MihomoController,
+    probe_lock: Arc<Mutex<()>>,
     node_id: Uuid,
     internal_name: String,
 ) -> NodeLatencyProbe {
     let checked_at = now().unwrap_or_default();
     let mut errors = Vec::new();
+    let _guard = probe_lock.lock().await;
+    if let Err(error) = controller
+        .select(LATENCY_PROBE_SELECTOR, &internal_name)
+        .await
+    {
+        return NodeLatencyProbe {
+            node_id,
+            delay_ms: None,
+            error: Some(format!("测速探测组选择节点失败：{}", error.message)),
+            checked_at,
+        };
+    }
     for test_url in LATENCY_TEST_URLS {
         match controller
-            .delay(&internal_name, test_url, LATENCY_TIMEOUT)
+            .delay(LATENCY_PROBE_SELECTOR, test_url, LATENCY_TIMEOUT)
             .await
         {
             Ok(delay_ms) => {
+                let _ = controller.select(LATENCY_PROBE_SELECTOR, "REJECT").await;
                 return NodeLatencyProbe {
                     node_id,
                     delay_ms: Some(delay_ms),
@@ -783,6 +799,7 @@ async fn probe_node_latency(
             Err(error) => errors.push(format!("{}: {}", test_url, error.message)),
         }
     }
+    let _ = controller.select(LATENCY_PROBE_SELECTOR, "REJECT").await;
     NodeLatencyProbe {
         node_id,
         delay_ms: None,
@@ -850,6 +867,7 @@ pub async fn start_latency_test(
         .await
         .insert(job_id, cancel.clone());
     let total = nodes.len();
+    let probe_lock = Arc::new(Mutex::new(()));
     let path = commands::database_path(&state)?;
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -863,10 +881,11 @@ pub async fn start_latency_test(
                 let controller = controller.clone();
                 let node_id = node.id;
                 let internal_name = node.internal_name.clone();
+                let probe_lock = probe_lock.clone();
                 let child = cancel.child_token();
                 tasks.spawn(async move {
                     tokio::select! {
-                        result = probe_node_latency(controller, node_id, internal_name) => Some(result),
+                        result = probe_node_latency(controller, probe_lock, node_id, internal_name) => Some(result),
                         _ = child.cancelled() => None,
                     }
                 });
@@ -955,7 +974,13 @@ pub async fn test_node_latency(
         .controller()
         .await
         .map_err(text)?;
-    let result = probe_node_latency(controller, node.id, node.internal_name).await;
+    let result = probe_node_latency(
+        controller,
+        Arc::new(Mutex::new(())),
+        node.id,
+        node.internal_name,
+    )
+    .await;
     state
         .node_latency_results
         .lock()
@@ -988,11 +1013,13 @@ pub async fn test_all_node_latencies(
         .await
         .map_err(text)?;
     let mut results = Vec::with_capacity(nodes.len());
+    let probe_lock = Arc::new(Mutex::new(()));
     for chunk in nodes.chunks(LATENCY_CONCURRENCY) {
         let mut tasks = tokio::task::JoinSet::new();
         for node in chunk {
             tasks.spawn(probe_node_latency(
                 controller.clone(),
+                probe_lock.clone(),
                 node.id,
                 node.internal_name.clone(),
             ));

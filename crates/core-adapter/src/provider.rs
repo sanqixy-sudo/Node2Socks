@@ -57,6 +57,16 @@ pub fn render_provider_topology(
             yaml_escape(slot.selected.as_deref().unwrap_or("REJECT"))
         ));
     }
+    // Hidden selector used solely for latency tests. It never owns a listener,
+    // so probing a node cannot change any user Slot binding or traffic route.
+    out.push_str("  - name: node2socks-probe\n    type: select\n    proxies:\n      - REJECT\n");
+    if !providers.is_empty() {
+        out.push_str("    use:\n");
+        for provider in providers {
+            out.push_str(&format!("      - provider-{}\n", provider.subscription_id));
+        }
+    }
+    out.push_str("    default-selected: REJECT\n    empty-fallback: REJECT\n");
     out.push_str("rules: []\n");
     Ok(out)
 }
