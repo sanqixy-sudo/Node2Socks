@@ -42,11 +42,15 @@ use tokio_util::sync::CancellationToken;
 pub struct ProductState {
     pub master_key: Mutex<Option<SecretKey>>,
     pub database: Mutex<Option<PathBuf>>,
+    pub app_handle: Mutex<Option<AppHandle>>,
     pub bridge: ProviderBridge,
     pub bridge_handle: AsyncMutex<Option<ProviderBridgeHandle>>,
     pub core: AsyncMutex<Option<Arc<MihomoManager>>>,
     pub crash_monitor: AsyncMutex<Option<CrashMonitor>>,
     pub core_running: AtomicBool,
+    /// Session-stable localhost port of the dedicated subscription-download
+    /// SOCKS listener; chosen on Core start when a node-mode subscription exists.
+    pub download_port: Mutex<Option<u16>>,
     pub cloud: AsyncMutex<Option<CloudSession>>,
     pub sync_key: Mutex<Option<SecretKey>>,
     pub refresh_cancel: CancellationToken,
@@ -552,11 +556,13 @@ pub fn run() {
         .manage(ProductState {
             database: Mutex::new(None),
             master_key: Mutex::new(None),
+            app_handle: Mutex::new(None),
             bridge: ProviderBridge::new(),
             bridge_handle: AsyncMutex::new(None),
             core: AsyncMutex::new(None),
             crash_monitor: AsyncMutex::new(None),
             core_running: AtomicBool::new(false),
+            download_port: Mutex::new(None),
             cloud: AsyncMutex::new(None),
             sync_key: Mutex::new(None),
             refresh_cancel: CancellationToken::new(),
@@ -566,6 +572,10 @@ pub fn run() {
             latency_jobs: AsyncMutex::new(HashMap::new()),
         })
         .setup(|app| {
+            *app.state::<ProductState>()
+                .app_handle
+                .lock()
+                .map_err(|e| std::io::Error::other(e.to_string()))? = Some(app.handle().clone());
             let dir = match std::env::var_os("NODE2SOCKS_DATA_DIR") {
                 Some(value) => {
                     let path = PathBuf::from(value);
@@ -659,6 +669,7 @@ pub fn run() {
                                     if let Err(error) = commands::refresh_subscription_inner(&state, id, &cancel).await {
                                         tracing::warn!(%error, %id, "automatic subscription refresh failed");
                                     }
+                                    crate::events::emit_snapshot_dirty(&app_handle, "all");
                                 }
                             }
                         }
@@ -675,6 +686,8 @@ pub fn run() {
                     let state = app_handle.state::<ProductState>();
                     if let Err(error) = commands::start_core_inner(&state).await {
                         tracing::warn!(%error, "automatic proxy core start failed");
+                    } else {
+                        crate::events::emit_snapshot_dirty(&app_handle, "dashboard");
                     }
                 });
             }
@@ -710,6 +723,7 @@ pub fn run() {
             crate::advanced_commands::batch_create_slots,
             crate::advanced_commands::rename_slot,
             crate::advanced_commands::update_slot,
+            crate::advanced_commands::suggest_slot_rebind,
             commands::delete_slot,
             crate::advanced_commands::batch_delete_slots,
             commands::bind_slot,
@@ -972,6 +986,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     if let Err(error) = commands::start_core_inner(&state).await {
                         tracing::error!(%error, "failed to start Core from tray");
                         show_main_window(&handle);
+                    } else {
+                        crate::events::emit_snapshot_dirty(&handle, "dashboard");
                     }
                 });
             }
@@ -982,6 +998,8 @@ fn setup_tray(app: &AppHandle) -> tauri::Result<()> {
                     if let Err(error) = commands::stop_core_inner(&state).await {
                         tracing::error!(%error, "failed to stop Core from tray");
                         show_main_window(&handle);
+                    } else {
+                        crate::events::emit_snapshot_dirty(&handle, "dashboard");
                     }
                 });
             }

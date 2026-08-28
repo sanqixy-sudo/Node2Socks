@@ -5,7 +5,7 @@ use crate::{
 use node2socks_domain::{DEFAULT_PORT_END, DEFAULT_PORT_START, ProxySlot, SlotBindingState};
 use node2socks_runtime_service::{HealthChecker, HealthResult};
 use node2socks_slot_manager::{PortAllocator, PortRange, SlotRepository, SystemPortProbe};
-use node2socks_subscriptions::{DownloadMode, SubscriptionRecord};
+use node2socks_subscriptions::{CatalogNode, DownloadMode, SubscriptionRecord};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -39,6 +39,7 @@ pub struct SubscriptionDetail {
     pub download_mode: String,
     pub user_agent: Option<String>,
     pub proxy_url: Option<String>,
+    pub download_node_id: Option<String>,
     pub headers: Vec<HeaderEntry>,
 }
 
@@ -52,6 +53,8 @@ pub struct SubscriptionInput {
     pub download_mode: String,
     pub user_agent: Option<String>,
     pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub download_node_id: Option<String>,
     #[serde(default)]
     pub headers: Vec<HeaderEntry>,
 }
@@ -316,6 +319,7 @@ pub async fn save_subscription(
         last_success_at: previous.as_ref().and_then(|item| item.last_success_at),
         last_error: previous.as_ref().and_then(|item| item.last_error.clone()),
         download_mode: mode(&input.download_mode)?,
+        download_node_id: download_node_id_for(&input)?,
         user_agent: clean(input.user_agent),
         headers: input
             .headers
@@ -364,6 +368,7 @@ pub async fn update_subscription(
         last_success_at: previous.last_success_at,
         last_error: previous.last_error,
         download_mode: mode(&input.download_mode)?,
+        download_node_id: download_node_id_for(&input)?,
         user_agent: clean(input.user_agent),
         proxy_url: clean(input.proxy_url),
         headers: input
@@ -659,6 +664,189 @@ pub async fn batch_delete_slots(
         value: ids.len(),
         warning: (!warnings.is_empty()).then(|| warnings.join("；")),
     })
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RebindCandidate {
+    pub node_id: String,
+    pub display_name: String,
+    pub subscription_name: String,
+    pub protocol: String,
+    pub latency_ms: Option<u64>,
+}
+
+#[tauri::command]
+pub fn suggest_slot_rebind(
+    state: State<'_, ProductState>,
+    slot_id: String,
+) -> Result<Vec<RebindCandidate>, String> {
+    let slot_id = parse_id(&slot_id)?;
+    let (_, binding) = commands::slot_repository(&state)?
+        .list()
+        .map_err(text)?
+        .into_iter()
+        .find(|(slot, _)| slot.id == slot_id)
+        .ok_or("Slot 不存在")?;
+    if binding.state != SlotBindingState::Orphaned {
+        return Ok(Vec::new());
+    }
+    let repository = commands::subscription_repository(&state)?;
+    let subscriptions: HashMap<_, _> = repository
+        .list()
+        .map_err(text)?
+        .into_iter()
+        .map(|item| (item.id, item.name))
+        .collect();
+    let nodes = repository.nodes().map_err(text)?;
+    let vanished = binding
+        .node_id
+        .and_then(|id| nodes.iter().find(|node| node.id == id))
+        .map(|node| (Some(node.subscription_id), node.display_name.clone()))
+        .or_else(|| {
+            last_applied_internal_name(&state, slot_id)
+                .ok()
+                .flatten()
+                .map(|internal_name| {
+                    nodes
+                        .iter()
+                        .find(|node| node.internal_name == internal_name)
+                        .map(|node| (Some(node.subscription_id), node.display_name.clone()))
+                        .unwrap_or((None, internal_name))
+                })
+        });
+    let Some((vanished_subscription, vanished_name)) = vanished else {
+        return Ok(Vec::new());
+    };
+    let connection =
+        node2socks_storage::open_and_migrate(commands::database_path(&state)?).map_err(text)?;
+    let mut latency = HashMap::<Uuid, u64>::new();
+    {
+        let mut statement = connection
+            .prepare("SELECT node_id,delay_ms FROM node_latency_results WHERE delay_ms IS NOT NULL")
+            .map_err(text)?;
+        let rows = statement
+            .query_map([], |row| {
+                let node_id: String = row.get(0)?;
+                Ok((
+                    Uuid::parse_str(&node_id).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    row.get::<_, u64>(1)?,
+                ))
+            })
+            .map_err(text)?;
+        for row in rows {
+            let (node_id, delay_ms) = row.map_err(text)?;
+            latency.insert(node_id, delay_ms);
+        }
+    }
+    Ok(
+        rank_rebind_candidates(vanished_subscription, &vanished_name, &nodes)
+            .into_iter()
+            .map(|node| RebindCandidate {
+                node_id: node.id.to_string(),
+                display_name: node.display_name.clone(),
+                subscription_name: subscriptions
+                    .get(&node.subscription_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                protocol: node.protocol.clone(),
+                latency_ms: latency.get(&node.id).copied(),
+            })
+            .collect(),
+    )
+}
+
+fn last_applied_internal_name(
+    state: &ProductState,
+    slot_id: Uuid,
+) -> Result<Option<String>, String> {
+    node2socks_storage::open_and_migrate(commands::database_path(state)?)
+        .map_err(text)?
+        .query_row(
+            "SELECT last_applied_internal_name FROM slot_bindings WHERE slot_id=?1",
+            [slot_id.to_string()],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(text)
+        .map(Option::flatten)
+}
+
+const SAME_SUBSCRIPTION_BONUS: i64 = 1000;
+const REBIND_CANDIDATE_LIMIT: usize = 5;
+
+fn rank_rebind_candidates<'a>(
+    vanished_subscription: Option<Uuid>,
+    vanished_name: &str,
+    nodes: &'a [CatalogNode],
+) -> Vec<&'a CatalogNode> {
+    let mut scored: Vec<_> = nodes
+        .iter()
+        .filter(|node| node.present)
+        .map(|node| {
+            (
+                rebind_score(vanished_subscription, vanished_name, node),
+                node,
+            )
+        })
+        .collect();
+    scored.sort_by(|(a_score, a), (b_score, b)| {
+        b_score
+            .cmp(a_score)
+            .then_with(|| a.display_name.cmp(&b.display_name))
+    });
+    scored
+        .into_iter()
+        .take(REBIND_CANDIDATE_LIMIT)
+        .map(|(_, node)| node)
+        .collect()
+}
+
+fn rebind_score(
+    vanished_subscription: Option<Uuid>,
+    vanished_name: &str,
+    candidate: &CatalogNode,
+) -> i64 {
+    let same_subscription = i64::from(vanished_subscription == Some(candidate.subscription_id))
+        * SAME_SUBSCRIPTION_BONUS;
+    same_subscription + name_similarity(vanished_name, &candidate.display_name)
+}
+
+fn name_similarity(target: &str, candidate: &str) -> i64 {
+    let target = target.to_lowercase();
+    let candidate = candidate.to_lowercase();
+    if target.is_empty() || candidate.is_empty() {
+        return 0;
+    }
+    if target == candidate {
+        return 100;
+    }
+    let prefix = target
+        .chars()
+        .zip(candidate.chars())
+        .take_while(|(a, b)| a == b)
+        .count() as i64;
+    let containment = if candidate.contains(&target) || target.contains(&candidate) {
+        target.chars().count().min(candidate.chars().count()) as i64
+    } else {
+        0
+    };
+    let target_tokens = name_tokens(&target);
+    let overlap = name_tokens(&candidate).intersection(&target_tokens).count() as i64;
+    prefix * 2 + containment * 3 + overlap * 10
+}
+
+fn name_tokens(value: &str) -> std::collections::HashSet<&str> {
+    value
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
 #[tauri::command]
@@ -1178,6 +1366,7 @@ fn detail(item: SubscriptionRecord) -> SubscriptionDetail {
         download_mode: mode_name(&item.download_mode).into(),
         user_agent: item.user_agent,
         proxy_url: item.proxy_url,
+        download_node_id: item.download_node_id.map(|id| id.to_string()),
         headers: item
             .headers
             .into_iter()
@@ -1198,9 +1387,9 @@ fn validate_subscription(input: &SubscriptionInput) -> Result<(), String> {
     }
     let mode = mode(&input.download_mode)?;
     match mode {
-        DownloadMode::Direct => {
+        DownloadMode::Direct | DownloadMode::System => {
             if clean(input.proxy_url.clone()).is_some() {
-                return Err("直连下载不能填写代理地址".into());
+                return Err("直连或系统代理下载不能填写代理地址".into());
             }
         }
         DownloadMode::CustomHttp => {
@@ -1208,6 +1397,12 @@ fn validate_subscription(input: &SubscriptionInput) -> Result<(), String> {
         }
         DownloadMode::CustomSocks5 => {
             validate_proxy_url(input.proxy_url.as_deref(), &["socks5", "socks5h"])?
+        }
+        DownloadMode::Node => {
+            if clean(input.proxy_url.clone()).is_some() {
+                return Err("通过节点下载不能填写代理地址".into());
+            }
+            clean_node_id(input.download_node_id.clone())?.ok_or("通过节点下载必须选择一个节点")?;
         }
     }
     Ok(())
@@ -1243,16 +1438,35 @@ fn validate_slot_name(value: &str) -> Result<String, String> {
 fn mode(value: &str) -> Result<DownloadMode, String> {
     match value {
         "direct" => Ok(DownloadMode::Direct),
+        "system" => Ok(DownloadMode::System),
         "custom_http" => Ok(DownloadMode::CustomHttp),
         "custom_socks5" => Ok(DownloadMode::CustomSocks5),
+        "node" => Ok(DownloadMode::Node),
         _ => Err("下载模式无效".into()),
     }
 }
 fn mode_name(value: &DownloadMode) -> &'static str {
     match value {
         DownloadMode::Direct => "direct",
+        DownloadMode::System => "system",
         DownloadMode::CustomHttp => "custom_http",
         DownloadMode::CustomSocks5 => "custom_socks5",
+        DownloadMode::Node => "node",
+    }
+}
+fn clean_node_id(value: Option<String>) -> Result<Option<Uuid>, String> {
+    value
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .map(|v| parse_id(&v).map_err(|_| "下载节点无效".to_owned()))
+        .transpose()
+}
+/// Only node-mode subscriptions keep a download node; other modes clear it.
+fn download_node_id_for(input: &SubscriptionInput) -> Result<Option<Uuid>, String> {
+    if mode(&input.download_mode)? == DownloadMode::Node {
+        clean_node_id(input.download_node_id.clone())
+    } else {
+        Ok(None)
     }
 }
 fn clean(value: Option<String>) -> Option<String> {
@@ -1277,6 +1491,62 @@ fn text(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn catalog_node(subscription: Uuid, name: &str, present: bool) -> CatalogNode {
+        CatalogNode {
+            id: Uuid::new_v4(),
+            subscription_id: subscription,
+            stable_key: name.into(),
+            internal_name: name.into(),
+            display_name: name.into(),
+            protocol: "ss".into(),
+            present,
+        }
+    }
+
+    #[test]
+    fn rebind_candidates_prefer_the_same_subscription() {
+        let subscription_a = Uuid::new_v4();
+        let subscription_b = Uuid::new_v4();
+        let nodes = vec![
+            catalog_node(subscription_b, "香港 01", true),
+            catalog_node(subscription_a, "美国 03", true),
+        ];
+        let ranked = rank_rebind_candidates(Some(subscription_a), "香港 02", &nodes);
+        assert_eq!(ranked[0].display_name, "美国 03");
+    }
+
+    #[test]
+    fn rebind_candidates_rank_renamed_similar_names_first() {
+        let subscription = Uuid::new_v4();
+        let nodes = vec![
+            catalog_node(subscription, "美国 03", true),
+            catalog_node(subscription, "香港 02 IEPL", true),
+            catalog_node(subscription, "香港 01 IEPL", false),
+        ];
+        let ranked = rank_rebind_candidates(Some(subscription), "香港 01 IEPL", &nodes);
+        assert_eq!(ranked.len(), 2);
+        assert_eq!(ranked[0].display_name, "香港 02 IEPL");
+    }
+
+    #[test]
+    fn rebind_candidates_return_empty_without_present_nodes() {
+        let subscription = Uuid::new_v4();
+        let nodes = vec![catalog_node(subscription, "香港 01", false)];
+        assert!(rank_rebind_candidates(Some(subscription), "香港 01", &nodes).is_empty());
+        assert!(rank_rebind_candidates(Some(subscription), "香港 01", &[]).is_empty());
+    }
+
+    #[test]
+    fn name_similarity_rewards_prefix_containment_and_token_overlap() {
+        assert_eq!(name_similarity("香港 01", "香港 01"), 100);
+        let renamed = name_similarity("香港 01 IEPL", "香港 02 IEPL");
+        let unrelated = name_similarity("香港 01 IEPL", "美国 03");
+        assert!(renamed > unrelated);
+        assert!(name_similarity("香港", "香港 01") > 0);
+        assert_eq!(name_similarity("", "香港 01"), 0);
+    }
+
     #[test]
     fn settings_validation_rejects_invalid_ranges() {
         let value = AppSettings {
@@ -1299,5 +1569,54 @@ mod tests {
         assert!(validate_slot_name("  ").is_err());
         assert!(validate_slot_name("店铺\nA").is_err());
         assert!(validate_slot_name(&"a".repeat(81)).is_err());
+    }
+
+    fn subscription_input(download_mode: &str) -> SubscriptionInput {
+        SubscriptionInput {
+            name: "Airport".into(),
+            url: "https://example.test/sub".into(),
+            enabled: true,
+            refresh_interval_sec: 1800,
+            download_mode: download_mode.into(),
+            user_agent: None,
+            proxy_url: None,
+            download_node_id: None,
+            headers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn download_mode_string_mapping_roundtrips() {
+        for value in ["direct", "system", "custom_http", "custom_socks5", "node"] {
+            assert_eq!(mode_name(&mode(value).unwrap()), value);
+        }
+        assert!(mode("bogus").is_err());
+    }
+
+    #[test]
+    fn node_download_mode_requires_a_node_and_forbids_proxy_url() {
+        let mut input = subscription_input("node");
+        assert_eq!(
+            validate_subscription(&input).unwrap_err(),
+            "通过节点下载必须选择一个节点"
+        );
+        input.download_node_id = Some("not-a-uuid".into());
+        assert_eq!(validate_subscription(&input).unwrap_err(), "下载节点无效");
+        input.download_node_id = Some(Uuid::new_v4().to_string());
+        assert!(validate_subscription(&input).is_ok());
+        input.proxy_url = Some("http://127.0.0.1:7890".into());
+        assert_eq!(
+            validate_subscription(&input).unwrap_err(),
+            "通过节点下载不能填写代理地址"
+        );
+    }
+
+    #[test]
+    fn non_node_modes_drop_the_download_node() {
+        let mut input = subscription_input("direct");
+        input.download_node_id = Some(Uuid::new_v4().to_string());
+        assert_eq!(download_node_id_for(&input).unwrap(), None);
+        input.download_mode = "node".into();
+        assert!(download_node_id_for(&input).unwrap().is_some());
     }
 }

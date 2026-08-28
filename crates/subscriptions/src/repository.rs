@@ -38,15 +38,15 @@ impl SubscriptionRepository {
             .map(|value| encrypt(&self.key, value.as_bytes(), aad.as_bytes()))
             .transpose()?;
         self.connection.lock().map_err(lock_error)?.execute(
-            "INSERT INTO subscriptions(id,name,url_cipher,refresh_interval_sec,headers_cipher,enabled,next_refresh_at,download_mode,user_agent,proxy_url_cipher,created_at,updated_at,sync_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11,?12) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url_cipher=excluded.url_cipher,refresh_interval_sec=excluded.refresh_interval_sec,headers_cipher=excluded.headers_cipher,enabled=excluded.enabled,next_refresh_at=excluded.next_refresh_at,download_mode=excluded.download_mode,user_agent=excluded.user_agent,proxy_url_cipher=excluded.proxy_url_cipher,updated_at=excluded.updated_at,sync_version=excluded.sync_version",
-            params![item.id.to_string(),item.name,url,item.refresh_interval_sec,headers,item.enabled,item.next_refresh_at.map(|v|v.to_string()),mode_name(&item.download_mode),item.user_agent,proxy_url,now,item.revision]
+            "INSERT INTO subscriptions(id,name,url_cipher,refresh_interval_sec,headers_cipher,enabled,next_refresh_at,download_mode,user_agent,proxy_url_cipher,download_node_id,created_at,updated_at,sync_version) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?12,?13) ON CONFLICT(id) DO UPDATE SET name=excluded.name,url_cipher=excluded.url_cipher,refresh_interval_sec=excluded.refresh_interval_sec,headers_cipher=excluded.headers_cipher,enabled=excluded.enabled,next_refresh_at=excluded.next_refresh_at,download_mode=excluded.download_mode,user_agent=excluded.user_agent,proxy_url_cipher=excluded.proxy_url_cipher,download_node_id=excluded.download_node_id,updated_at=excluded.updated_at,sync_version=excluded.sync_version",
+            params![item.id.to_string(),item.name,url,item.refresh_interval_sec,headers,item.enabled,item.next_refresh_at.map(|v|v.to_string()),mode_name(&item.download_mode),item.user_agent,proxy_url,item.download_node_id.map(|id|id.to_string()),now,item.revision]
         ).map_err(db_error)?;
         Ok(())
     }
 
     pub fn get(&self, id: Uuid) -> AppResult<Option<SubscriptionRecord>> {
         let connection = self.connection.lock().map_err(lock_error)?;
-        connection.query_row("SELECT id,name,url_cipher,enabled,refresh_interval_sec,next_refresh_at,last_success_at,last_error,download_mode,user_agent,headers_cipher,proxy_url_cipher,sync_version FROM subscriptions WHERE id=?1", [id.to_string()], |row| {
+        connection.query_row("SELECT id,name,url_cipher,enabled,refresh_interval_sec,next_refresh_at,last_success_at,last_error,download_mode,user_agent,headers_cipher,proxy_url_cipher,sync_version,download_node_id FROM subscriptions WHERE id=?1", [id.to_string()], |row| {
             let id_text: String = row.get(0)?;
             let id = Uuid::parse_str(&id_text).map_err(convert_error)?;
             let aad = format!("subscription:{id}");
@@ -56,7 +56,8 @@ impl SubscriptionRepository {
             let headers = match headers_cipher { Some(value) => serde_json::from_slice(&decrypt(&self.key,&value,aad.as_bytes()).map_err(convert_app_error)?).map_err(convert_error)?, None => Vec::new() };
             let proxy_cipher: Option<Vec<u8>> = row.get(11)?;
             let proxy_url = proxy_cipher.map(|value| String::from_utf8(decrypt(&self.key,&value,aad.as_bytes()).map_err(convert_app_error)?).map_err(convert_error)).transpose()?;
-            Ok(SubscriptionRecord { id, name:row.get(1)?, url, enabled:row.get::<_,i64>(3)? != 0, refresh_interval_sec:row.get(4)?, next_refresh_at:parse_time(row.get(5)?)?, last_success_at:parse_time(row.get(6)?)?, last_error:row.get(7)?, download_mode:parse_mode(&row.get::<_,String>(8)?)?, user_agent:row.get(9)?, headers, proxy_url, revision:row.get(12)? })
+            let download_node_id = row.get::<_,Option<String>>(13)?.map(|value| Uuid::parse_str(&value).map_err(convert_error)).transpose()?;
+            Ok(SubscriptionRecord { id, name:row.get(1)?, url, enabled:row.get::<_,i64>(3)? != 0, refresh_interval_sec:row.get(4)?, next_refresh_at:parse_time(row.get(5)?)?, last_success_at:parse_time(row.get(6)?)?, last_error:row.get(7)?, download_mode:parse_mode(&row.get::<_,String>(8)?)?, user_agent:row.get(9)?, headers, proxy_url, download_node_id, revision:row.get(12)? })
         }).optional().map_err(db_error)
     }
 
@@ -249,15 +250,19 @@ fn now() -> AppResult<u64> {
 fn mode_name(mode: &DownloadMode) -> &'static str {
     match mode {
         DownloadMode::Direct => "direct",
+        DownloadMode::System => "system",
         DownloadMode::CustomHttp => "custom_http",
         DownloadMode::CustomSocks5 => "custom_socks5",
+        DownloadMode::Node => "node",
     }
 }
 fn parse_mode(value: &str) -> rusqlite::Result<DownloadMode> {
     match value {
         "direct" => Ok(DownloadMode::Direct),
+        "system" => Ok(DownloadMode::System),
         "custom_http" => Ok(DownloadMode::CustomHttp),
         "custom_socks5" => Ok(DownloadMode::CustomSocks5),
+        "node" => Ok(DownloadMode::Node),
         _ => Err(convert_error(std::io::Error::other("invalid mode"))),
     }
 }

@@ -5,8 +5,10 @@ use uuid::Uuid;
 #[serde(rename_all = "snake_case")]
 pub enum DownloadMode {
     Direct,
+    System,
     CustomHttp,
     CustomSocks5,
+    Node,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +25,8 @@ pub struct SubscriptionRecord {
     pub user_agent: Option<String>,
     #[serde(default)]
     pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub download_node_id: Option<Uuid>,
     pub headers: Vec<(String, String)>,
     pub revision: u64,
 }

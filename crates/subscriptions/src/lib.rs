@@ -4,10 +4,12 @@ pub mod model;
 pub mod parser;
 pub mod repository;
 pub mod service;
+pub mod system_proxy;
 
 pub use bridge::{ProviderBridge, ProviderBridgeHandle};
 pub use fetch::{FetchOptions, SubscriptionFetcher};
 pub use model::{CatalogNode, DownloadMode, ProviderDiff, RefreshResult, SubscriptionRecord};
 pub use parser::{DetectedSubscription, NormalizedNode, SubscriptionFormat, detect_and_normalize};
 pub use repository::SubscriptionRepository;
-pub use service::SubscriptionService;
+pub use service::{NodeDownloadDialer, SubscriptionService};
+pub use system_proxy::system_proxy_url;

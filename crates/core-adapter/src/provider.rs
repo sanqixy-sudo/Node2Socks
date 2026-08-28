@@ -1,4 +1,4 @@
-use crate::topology::{CoreTopology, slot_selector_name};
+use crate::topology::{CoreTopology, DOWNLOAD_SELECTOR, slot_selector_name};
 use node2socks_domain::{AppError, AppResult, ErrorCode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -41,6 +41,9 @@ pub fn render_provider_topology(
         let selector = slot_selector_name(slot.id);
         out.push_str(&format!("  - name: {selector}-in\n    type: socks\n    listen: 127.0.0.1\n    port: {}\n    proxy: {selector}\n    udp: false\n",slot.local_port));
     }
+    if let Some(port) = topology.download_port {
+        out.push_str(&format!("  - name: {DOWNLOAD_SELECTOR}-in\n    type: socks\n    listen: 127.0.0.1\n    port: {port}\n    proxy: {DOWNLOAD_SELECTOR}\n    udp: false\n"));
+    }
     out.push_str("proxies: []\nproxy-groups:\n");
     for slot in &topology.slots {
         let selector = slot_selector_name(slot.id);
@@ -57,6 +60,20 @@ pub fn render_provider_topology(
             "    default-selected: \"{}\"\n    empty-fallback: REJECT\n",
             yaml_escape(slot.selected.as_deref().unwrap_or("REJECT"))
         ));
+    }
+    // Dedicated selector for subscription downloads via a node. Like the probe
+    // selector it never changes Slot routing and fails closed on REJECT.
+    if topology.download_port.is_some() {
+        out.push_str(&format!(
+            "  - name: {DOWNLOAD_SELECTOR}\n    type: select\n    proxies:\n      - REJECT\n"
+        ));
+        if !providers.is_empty() {
+            out.push_str("    use:\n");
+            for provider in providers {
+                out.push_str(&format!("      - provider-{}\n", provider.subscription_id));
+            }
+        }
+        out.push_str("    default-selected: REJECT\n    empty-fallback: REJECT\n");
     }
     // Hidden selector used solely for latency tests. It never owns a listener,
     // so probing a node cannot change any user Slot binding or traffic route.
@@ -94,6 +111,7 @@ mod tests {
                     selected: Some(node.clone()),
                 }],
                 available_nodes: vec![node.clone()],
+                download_port: None,
             },
             &[ProviderSource {
                 subscription_id: subscription,
@@ -125,5 +143,45 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn download_lane_uses_every_provider_and_fails_closed() {
+        let subscription = Uuid::new_v4();
+        let config = render_provider_topology(
+            &CoreTopology {
+                slots: vec![],
+                available_nodes: vec![],
+                download_port: Some(22_051),
+            },
+            &[ProviderSource {
+                subscription_id: subscription,
+                url: format!("http://127.0.0.1:4567/provider/{subscription}"),
+                bearer_token: "secret".into(),
+                interval_seconds: 300,
+            }],
+            19090,
+            "controller",
+        )
+        .unwrap();
+        assert!(config.contains(&format!("  - name: {DOWNLOAD_SELECTOR}-in\n")));
+        assert!(config.contains("    port: 22051\n"));
+        assert!(config.contains(&format!(
+            "  - name: {DOWNLOAD_SELECTOR}\n    type: select\n    proxies:\n      - REJECT\n    use:\n      - provider-{subscription}\n    default-selected: REJECT\n    empty-fallback: REJECT\n"
+        )));
+        // Without a download port no download listener or selector is rendered.
+        let quiet = render_provider_topology(
+            &CoreTopology::default(),
+            &[ProviderSource {
+                subscription_id: subscription,
+                url: format!("http://127.0.0.1:4567/provider/{subscription}"),
+                bearer_token: "secret".into(),
+                interval_seconds: 300,
+            }],
+            19090,
+            "controller",
+        )
+        .unwrap();
+        assert!(!quiet.contains(DOWNLOAD_SELECTOR));
     }
 }

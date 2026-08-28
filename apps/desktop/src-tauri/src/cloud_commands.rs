@@ -14,12 +14,15 @@ use std::{
     sync::atomic::Ordering,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[tauri::command]
-pub async fn cloud_push_local(state: State<'_, ProductState>) -> Result<usize, String> {
+pub async fn cloud_push_local(
+    app: AppHandle,
+    state: State<'_, ProductState>,
+) -> Result<usize, String> {
     let (base_url, token, vault_key) = cloud_snapshot(&state).await?;
     let path = database_path(&state)?;
     let repository = SubscriptionRepository::new(
@@ -69,15 +72,20 @@ pub async fn cloud_push_local(state: State<'_, ProductState>) -> Result<usize, S
             &settings,
         )
         .map_err(text)?;
-    CloudClient::new(&base_url, is_local(&base_url))
+    let pushed = CloudClient::new(&base_url, is_local(&base_url))
         .map_err(text)?
         .push_outbox(&token, &outbox, &CancellationToken::new())
         .await
-        .map_err(text)
+        .map_err(text)?;
+    crate::events::emit_snapshot_dirty(&app, "cloud");
+    Ok(pushed)
 }
 
 #[tauri::command]
-pub async fn cloud_pull_merge(state: State<'_, ProductState>) -> Result<usize, String> {
+pub async fn cloud_pull_merge(
+    app: AppHandle,
+    state: State<'_, ProductState>,
+) -> Result<usize, String> {
     if state.core_running.load(Ordering::Relaxed) {
         return Err("合并云端配置前请先停止 Core；这样可以可靠检测并保留每个固定端口".into());
     }
@@ -135,6 +143,7 @@ pub async fn cloud_pull_merge(state: State<'_, ProductState>) -> Result<usize, S
         }
         persist_cloud_cursor(&path, &base_url, next)?;
     }
+    crate::events::emit_snapshot_dirty(&app, "all");
     Ok(values.len())
 }
 
@@ -569,6 +578,7 @@ mod tests {
                 user_agent: None,
                 headers: Vec::new(),
                 proxy_url: None,
+                download_node_id: None,
                 revision: 0,
             })
             .unwrap();

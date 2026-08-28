@@ -149,6 +149,17 @@ impl MihomoManager {
 
     /// Run bounded crash detection and recovery until explicitly shut down.
     pub fn spawn_crash_monitor(self: Arc<Self>, poll_interval: Duration) -> CrashMonitor {
+        self.spawn_crash_monitor_with_notifier(poll_interval, |_| {})
+    }
+
+    /// Same as [`Self::spawn_crash_monitor`], but invokes `notify` with
+    /// "recovered" or "recovery-failed" whenever the child state changes, so
+    /// hosts can react (for example by notifying the UI) without polling.
+    pub fn spawn_crash_monitor_with_notifier(
+        self: Arc<Self>,
+        poll_interval: Duration,
+        notify: impl Fn(&'static str) + Send + Sync + 'static,
+    ) -> CrashMonitor {
         let (shutdown, mut shutdown_rx) = watch::channel(false);
         let task = tokio::spawn(async move {
             loop {
@@ -160,16 +171,22 @@ impl MihomoManager {
                     }
                     _ = sleep(poll_interval) => {
                         match self.recover_if_crashed().await {
-                            Ok(Some(health)) => tracing::info!(
-                                pid = health.pid,
-                                "Mihomo recovered after an unexpected exit"
-                            ),
+                            Ok(Some(health)) => {
+                                tracing::info!(
+                                    pid = health.pid,
+                                    "Mihomo recovered after an unexpected exit"
+                                );
+                                notify("recovered");
+                            }
                             Ok(None) => {}
-                            Err(error) => tracing::error!(
-                                code = %error.code,
-                                message = %error.message,
-                                "Mihomo crash recovery failed"
-                            ),
+                            Err(error) => {
+                                tracing::error!(
+                                    code = %error.code,
+                                    message = %error.message,
+                                    "Mihomo crash recovery failed"
+                                );
+                                notify("recovery-failed");
+                            }
                         }
                     }
                 }

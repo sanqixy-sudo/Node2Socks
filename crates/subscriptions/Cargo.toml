@@ -26,5 +26,8 @@ tracing.workspace = true
 url = "2.5.8"
 uuid.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation","Win32_System_Registry"] }
+
 [dev-dependencies]
 tower = { version = "0.5.3", features = ["util"] }

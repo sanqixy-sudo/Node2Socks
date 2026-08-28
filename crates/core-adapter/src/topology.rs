@@ -14,6 +14,10 @@ pub struct CoreTopology {
     pub slots: Vec<CoreSlot>,
     /// Mihomo internal proxy names exposed by current normalized providers.
     pub available_nodes: Vec<String>,
+    /// Dedicated localhost SOCKS port for subscription downloads via a node.
+    /// Present only when at least one subscription downloads via a node.
+    #[serde(default)]
+    pub download_port: Option<u16>,
 }
 
 impl CoreTopology {
@@ -35,6 +39,14 @@ impl CoreTopology {
                 ));
             }
         }
+        if let Some(port) = self.download_port
+            && (port == 0 || !ports.insert(port))
+        {
+            return Err(AppError::new(
+                ErrorCode::InvalidConfiguration,
+                "Core topology download port is zero or collides with a Slot port",
+            ));
+        }
         Ok(())
     }
 }
@@ -42,6 +54,10 @@ impl CoreTopology {
 pub fn slot_selector_name(id: Uuid) -> String {
     format!("slot-{id}")
 }
+
+/// Fixed selector routing subscription downloads through a chosen node.
+/// Fail-closed: without an explicit selection it resolves to REJECT.
+pub const DOWNLOAD_SELECTOR: &str = "n2s-download";
 
 /// Build only Mihomo runtime output. Product state must never be parsed back from it.
 pub fn render_topology(
@@ -72,6 +88,14 @@ pub fn render_topology(
         output.push_str(&format!("    proxy: {selector}\n"));
         output.push_str("    udp: false\n");
     }
+    if let Some(port) = topology.download_port {
+        output.push_str(&format!("  - name: {DOWNLOAD_SELECTOR}-in\n"));
+        output.push_str("    type: socks\n");
+        output.push_str("    listen: 127.0.0.1\n");
+        output.push_str(&format!("    port: {port}\n"));
+        output.push_str(&format!("    proxy: {DOWNLOAD_SELECTOR}\n"));
+        output.push_str("    udp: false\n");
+    }
     output.push_str("proxies: []\nproxy-groups:\n");
     for slot in &topology.slots {
         let selector = slot_selector_name(slot.id);
@@ -80,6 +104,13 @@ pub fn render_topology(
         output.push_str("    type: select\n");
         output.push_str("    proxies:\n      - REJECT\n      - DIRECT\n");
         output.push_str(&format!("    default-selected: {selected}\n"));
+        output.push_str("    empty-fallback: REJECT\n");
+    }
+    if topology.download_port.is_some() {
+        output.push_str(&format!("  - name: {DOWNLOAD_SELECTOR}\n"));
+        output.push_str("    type: select\n");
+        output.push_str("    proxies:\n      - REJECT\n");
+        output.push_str("    default-selected: REJECT\n");
         output.push_str("    empty-fallback: REJECT\n");
     }
     output.push_str("rules: []\n");
@@ -109,6 +140,7 @@ mod tests {
                     },
                 ],
                 available_nodes: vec![],
+                download_port: None,
             },
             19_090,
             "secret",
@@ -118,5 +150,28 @@ mod tests {
         assert!(!yaml.contains("0.0.0.0"));
         assert!(yaml.contains(&slot_selector_name(first)));
         assert!(yaml.contains(&slot_selector_name(second)));
+    }
+
+    #[test]
+    fn download_lane_is_localhost_fail_closed_and_never_collides_with_slots() {
+        let topology = CoreTopology {
+            slots: vec![CoreSlot {
+                id: Uuid::new_v4(),
+                local_port: 21_001,
+                selected: None,
+            }],
+            available_nodes: vec![],
+            download_port: Some(22_050),
+        };
+        let yaml = render_topology(&topology, 19_090, "secret").unwrap();
+        assert!(yaml.contains(&format!("  - name: {DOWNLOAD_SELECTOR}-in\n")));
+        assert!(yaml.contains("    port: 22050\n"));
+        assert!(yaml.contains(&format!("  - name: {DOWNLOAD_SELECTOR}\n")));
+        assert!(yaml.contains("    default-selected: REJECT\n"));
+        let colliding = CoreTopology {
+            download_port: Some(21_001),
+            ..topology
+        };
+        assert!(render_topology(&colliding, 19_090, "secret").is_err());
     }
 }

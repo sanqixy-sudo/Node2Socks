@@ -3,4 +3,5 @@ mod advanced_commands;
 mod backend;
 mod cloud_commands;
 mod commands;
+mod events;
 pub use backend::run;

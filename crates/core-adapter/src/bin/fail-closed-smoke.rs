@@ -29,6 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 selected: None,
             }],
             available_nodes: vec![],
+            download_port: None,
         },
         controller_port,
         &secret,

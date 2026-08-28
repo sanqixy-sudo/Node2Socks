@@ -4,7 +4,7 @@
 
 ### System Proxy
 
-Clash 只设置 Windows 系统 HTTP/SOCKS Proxy 时，Node2Socks 的 Rust HTTP client 与 Mihomo Core 默认不读取系统代理即可保持独立。
+Clash 只设置 Windows 系统 HTTP/SOCKS Proxy 时，Node2Socks 的 Rust HTTP client 与 Mihomo Core 默认不读取系统代理即可保持独立。唯一例外：单个订阅的下载网络显式选择「使用系统代理」时，仅该订阅的下载请求走系统代理，Proxy Core 出站不受影响。类似地，「通过节点下载」模式只让该订阅的下载请求经本机 Core 的专用下载通道（selector `n2s-download` + 仅 127.0.0.1 的 SOCKS 监听）从所选节点拨号，不影响任何 Slot 的路由与绑定。
 
 验收：关闭 Clash 后 Slot 仍能访问；打开 Clash 并切换节点后，Slot 的出口 IP 不变化。
 

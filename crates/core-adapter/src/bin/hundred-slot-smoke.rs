@@ -42,6 +42,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &CoreTopology {
             slots,
             available_nodes: vec![],
+            download_port: None,
         },
         controller_port,
         &secret,

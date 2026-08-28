@@ -3,16 +3,17 @@ use node2socks_core_adapter::{
     ProxyCore,
     mihomo::{MihomoConfig, MihomoManager},
     provider::ProviderSource,
-    topology::{CoreSlot, CoreTopology, slot_selector_name},
+    topology::{CoreSlot, CoreTopology, DOWNLOAD_SELECTOR, slot_selector_name},
 };
 use node2socks_diagnostics::NetworkAdapter;
-use node2socks_domain::{ProxySlot, SlotBinding, SlotBindingState};
+use node2socks_domain::{AppError, AppResult, ErrorCode, ProxySlot, SlotBinding, SlotBindingState};
 use node2socks_runtime_service::{HealthChecker, HealthResult, SlotReconciler};
 use node2socks_slot_manager::{
-    PortAllocator, PortRange, SlotRepository, SqliteSlotRepository, SystemPortProbe,
+    PortAllocator, PortProbe, PortRange, SlotRepository, SqliteSlotRepository, SystemPortProbe,
 };
 use node2socks_subscriptions::{
-    CatalogNode, DownloadMode, SubscriptionRecord, SubscriptionRepository, SubscriptionService,
+    CatalogNode, DownloadMode, NodeDownloadDialer, SubscriptionRecord, SubscriptionRepository,
+    SubscriptionService,
 };
 use rusqlite::OptionalExtension;
 use serde::Serialize;
@@ -95,6 +96,7 @@ pub async fn create_subscription(
         user_agent: None,
         headers: Vec::new(),
         proxy_url: None,
+        download_node_id: None,
         revision: 0,
     };
     if item.name.is_empty() {
@@ -168,9 +170,17 @@ pub(crate) async fn refresh_subscription_inner(
     id: Uuid,
     cancel: &CancellationToken,
 ) -> Result<usize, String> {
-    let service =
+    let mut service =
         SubscriptionService::new(subscription_repository(state)?, state.bridge.clone(), 4)
             .map_err(text)?;
+    if let Some(manager) = state.core.lock().await.as_ref() {
+        let port = *state.download_port.lock().map_err(|e| e.to_string())?;
+        service = service.with_node_dialer(Arc::new(CoreDownloadDialer {
+            manager: manager.clone(),
+            repository: subscription_repository(state)?,
+            port,
+        }));
+    }
     let result = service.refresh(id, cancel).await.map_err(text)?;
     if !result.diff.disappeared.is_empty() {
         if let Some(manager) = state.core.lock().await.as_ref() {
@@ -363,13 +373,14 @@ pub(crate) async fn start_core_inner(state: &ProductState) -> Result<u32, String
                 .map(|node| node.internal_name.clone()),
         })
         .collect();
-    let topology = CoreTopology {
+    let mut topology = CoreTopology {
         slots,
         available_nodes: nodes
             .iter()
             .filter(|node| node.present)
             .map(|node| node.internal_name.clone())
             .collect(),
+        download_port: None,
     };
     for slot in &topology.slots {
         if let Err(conflict) = PortAllocator::new(
@@ -399,6 +410,14 @@ pub(crate) async fn start_core_inner(state: &ProductState) -> Result<u32, String
         }
     }
     let subscriptions = repository.list().map_err(text)?;
+    // A subscription downloading via a node needs the dedicated download lane:
+    // one localhost SOCKS listener plus the fixed n2s-download selector.
+    if subscriptions
+        .iter()
+        .any(|item| item.download_mode == DownloadMode::Node)
+    {
+        topology.download_port = Some(resolve_download_port(state, &topology)?);
+    }
     let mut providers = Vec::new();
     for item in subscriptions.into_iter().filter(|item| item.enabled) {
         // A newly added or failed subscription has no normalized payload yet. Excluding it
@@ -426,7 +445,16 @@ pub(crate) async fn start_core_inner(state: &ProductState) -> Result<u32, String
     let manager = Arc::new(MihomoManager::new(config).map_err(text)?);
     let health = manager.start().await.map_err(text)?;
     let pid = health.pid.ok_or_else(|| "Core PID 不可用".to_owned())?;
-    let monitor = manager.clone().spawn_crash_monitor(Duration::from_secs(1));
+    let app = state.app_handle.lock().ok().and_then(|guard| guard.clone());
+    let monitor =
+        manager
+            .clone()
+            .spawn_crash_monitor_with_notifier(Duration::from_secs(1), move |reason| {
+                tracing::info!(%reason, "Core state changed in background");
+                if let Some(app) = &app {
+                    crate::events::emit_snapshot_dirty(app, "dashboard");
+                }
+            });
     *state.core.lock().await = Some(manager.clone());
     *state.crash_monitor.lock().await = Some(monitor);
     state.core_running.store(true, Ordering::Relaxed);
@@ -517,6 +545,82 @@ pub(crate) async fn rebuild_core(state: &ProductState) -> Result<(), String> {
     stop_core_inner(state).await?;
     start_core_inner(state).await?;
     Ok(())
+}
+
+/// Pick a session-stable port for the subscription download lane: reuse the
+/// stored port while it is free, otherwise scan outside the Slot port pool.
+fn resolve_download_port(state: &ProductState, topology: &CoreTopology) -> Result<u16, String> {
+    let slot_ports: HashSet<u16> = topology.slots.iter().map(|slot| slot.local_port).collect();
+    let settings = crate::advanced_commands::load_settings(state)?;
+    let probe = SystemPortProbe;
+    let mut stored = state.download_port.lock().map_err(|e| e.to_string())?;
+    if let Some(port) = *stored
+        && !slot_ports.contains(&port)
+        && probe.is_available(port)
+    {
+        return Ok(port);
+    }
+    for port in
+        (1024..=u16::MAX).filter(|port| *port < settings.port_start || *port > settings.port_end)
+    {
+        if !slot_ports.contains(&port) && probe.is_available(port) {
+            *stored = Some(port);
+            return Ok(port);
+        }
+    }
+    Err("没有可用于「通过节点下载」的空闲本机端口".into())
+}
+
+/// Dials subscription downloads through the running Core: switches the fixed
+/// download selector to the target node and returns the localhost SOCKS URL.
+struct CoreDownloadDialer {
+    manager: Arc<MihomoManager>,
+    repository: SubscriptionRepository,
+    port: Option<u16>,
+}
+
+impl NodeDownloadDialer for CoreDownloadDialer {
+    fn proxy_url_for(
+        &self,
+        node_id: Uuid,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = AppResult<String>> + Send + '_>> {
+        Box::pin(async move {
+            let node = self
+                .repository
+                .nodes()?
+                .into_iter()
+                .find(|node| node.id == node_id)
+                .ok_or_else(|| {
+                    AppError::new(
+                        ErrorCode::NodeUnavailable,
+                        "用于下载的节点不存在，请在订阅设置中重新选择",
+                    )
+                })?;
+            if !node.present {
+                return Err(AppError::new(
+                    ErrorCode::NodeUnavailable,
+                    "用于下载的节点已从订阅消失，请在订阅设置中重新选择",
+                ));
+            }
+            let port = self.port.ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::CoreNotRunning,
+                    "通过节点下载需要 Core 运行，请先启动 Core",
+                )
+            })?;
+            let controller = self.manager.controller().await?;
+            controller
+                .select(DOWNLOAD_SELECTOR, &node.internal_name)
+                .await?;
+            if controller.selected(DOWNLOAD_SELECTOR).await? != node.internal_name {
+                return Err(AppError::new(
+                    ErrorCode::CoreUnhealthy,
+                    "Core 未确认下载节点切换",
+                ));
+            }
+            Ok(format!("socks5h://127.0.0.1:{port}"))
+        })
+    }
 }
 pub(crate) fn subscription_repository(
     state: &ProductState,

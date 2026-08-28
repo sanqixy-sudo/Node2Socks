@@ -106,3 +106,10 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .node-page>.section{flex:none;min-height:0;margin-bottom:12px}
 .node-page>.section>.section-body{height:auto;min-height:0;overflow:visible}
 .node-card-scroll{height:auto;overflow:visible;padding:10px;overscroll-behavior:auto}
+/* Restrained motion polish: fast ease transitions on interactive surfaces and
+   a subtle fade when switching pages. prefers-reduced-motion already collapses
+   these via the global rule above. */
+.btn,.sidebar nav button,.table-row,.mini-list>button,.settings-layout>nav button,.window-controls button{transition:background .16s ease,border-color .16s ease,color .16s ease}
+.content{animation:page-in .18s ease-out}
+@keyframes page-in{from{opacity:0}to{opacity:1}}
+.subscription-toggle{display:flex;align-items:center;gap:7px}
