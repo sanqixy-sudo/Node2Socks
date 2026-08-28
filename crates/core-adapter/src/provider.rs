@@ -33,7 +33,8 @@ pub fn render_provider_topology(
     );
     for provider in providers {
         let name = format!("provider-{}", provider.subscription_id);
-        out.push_str(&format!("  {name}:\n    type: http\n    url: \"{}\"\n    interval: {}\n    path: ./providers/{name}.yaml\n    header:\n      Authorization:\n        - \"Bearer {}\"\n",provider.url,provider.interval_seconds.max(60),provider.bearer_token));
+        // Provider refresh is owned by Node2Socks; Mihomo must not independently\n        // fetch dynamic names and drift away from persisted Slot bindings.
+        out.push_str(&format!("  {name}:\n    type: http\n    url: \"{}\"\n    path: ./providers/{name}.yaml\n    header:\n      Authorization:\n        - \"Bearer {}\"\n",provider.url,provider.bearer_token));
     }
     out.push_str("listeners:\n");
     for slot in &topology.slots {
