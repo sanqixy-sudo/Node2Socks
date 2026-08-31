@@ -986,6 +986,61 @@ async fn probe_node_latency(
         checked_at,
     }
 }
+async fn current_controller(
+    app: &AppHandle,
+) -> Result<node2socks_core_adapter::controller::MihomoController, String> {
+    let state = app.state::<ProductState>();
+    state
+        .core
+        .lock()
+        .await
+        .as_ref()
+        .ok_or_else(|| "Core 尚未就绪".to_owned())?
+        .controller()
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Probe using the current Core controller. A Core rebuild rotates both the
+/// controller port and secret, so a controller captured before the rebuild
+/// can fail with a transient connection error. Re-acquire it and retry those
+/// transport failures automatically; node-level errors are returned as-is.
+async fn probe_node_latency_live(
+    app: AppHandle,
+    probe_worker: usize,
+    node_id: Uuid,
+    internal_name: String,
+) -> NodeLatencyProbe {
+    let mut last = None;
+    for attempt in 0..3 {
+        let controller = match current_controller(&app).await {
+            Ok(controller) => controller,
+            Err(error) => {
+                last = Some(error);
+                tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+                continue;
+            }
+        };
+        let result =
+            probe_node_latency(controller, probe_worker, node_id, internal_name.clone()).await;
+        let transient = result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("error sending request") || error.contains("连接"));
+        if !transient || attempt == 2 {
+            return result;
+        }
+        last = result.error;
+        tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
+    }
+    NodeLatencyProbe {
+        node_id,
+        delay_ms: None,
+        error: last.or_else(|| Some("Core 控制器暂时不可用".into())),
+        checked_at: now().unwrap_or_default(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LatencyJobView {
@@ -1029,15 +1084,7 @@ pub async fn start_latency_test(
     if nodes.len() != requested.len() {
         return Err("所选节点中存在已消失节点".into());
     }
-    let controller = state
-        .core
-        .lock()
-        .await
-        .as_ref()
-        .ok_or("Core 尚未就绪")?
-        .controller()
-        .await
-        .map_err(text)?;
+    state.core.lock().await.as_ref().ok_or("Core 尚未就绪")?;
     let job_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
     state
@@ -1056,13 +1103,13 @@ pub async fn start_latency_test(
             }
             let mut tasks = tokio::task::JoinSet::new();
             for (worker, node) in chunk.iter().enumerate() {
-                let controller = controller.clone();
+                let probe_app = app.clone();
                 let node_id = node.id;
                 let internal_name = node.internal_name.clone();
                 let child = cancel.child_token();
                 tasks.spawn(async move {
                     tokio::select! {
-                        result = probe_node_latency(controller, worker, node_id, internal_name) => Some(result),
+                        result = probe_node_latency_live(probe_app, worker, node_id, internal_name) => Some(result),
                         _ = child.cancelled() => None,
                     }
                 });
@@ -1142,16 +1189,13 @@ pub async fn test_node_latency(
         .into_iter()
         .find(|node| node.id == id && node.present)
         .ok_or("节点不存在或已从订阅消失")?;
-    let controller = state
-        .core
+    let app = state
+        .app_handle
         .lock()
-        .await
-        .as_ref()
-        .ok_or("Core 尚未就绪")?
-        .controller()
-        .await
-        .map_err(text)?;
-    let result = probe_node_latency(controller, 0, node.id, node.internal_name).await;
+        .map_err(|error| error.to_string())?
+        .clone()
+        .ok_or("应用尚未初始化")?;
+    let result = probe_node_latency_live(app, 0, node.id, node.internal_name).await;
     state
         .node_latency_results
         .lock()
@@ -1174,21 +1218,19 @@ pub async fn test_all_node_latencies(
         .into_iter()
         .filter(|node| node.present)
         .collect();
-    let controller = state
-        .core
+    state.core.lock().await.as_ref().ok_or("Core 尚未就绪")?;
+    let app = state
+        .app_handle
         .lock()
-        .await
-        .as_ref()
-        .ok_or("Core 尚未就绪")?
-        .controller()
-        .await
-        .map_err(text)?;
+        .map_err(|error| error.to_string())?
+        .clone()
+        .ok_or("应用尚未初始化")?;
     let mut results = Vec::with_capacity(nodes.len());
     for chunk in nodes.chunks(LATENCY_CONCURRENCY) {
         let mut tasks = tokio::task::JoinSet::new();
         for (worker, node) in chunk.iter().enumerate() {
-            tasks.spawn(probe_node_latency(
-                controller.clone(),
+            tasks.spawn(probe_node_latency_live(
+                app.clone(),
                 worker,
                 node.id,
                 node.internal_name.clone(),
