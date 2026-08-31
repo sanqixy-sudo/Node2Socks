@@ -75,19 +75,31 @@ pub fn render_provider_topology(
         }
         out.push_str("    default-selected: REJECT\n    empty-fallback: REJECT\n");
     }
-    // Hidden selector used solely for latency tests. It never owns a listener,
-    // so probing a node cannot change any user Slot binding or traffic route.
-    out.push_str("  - name: node2socks-probe\n    type: select\n    proxies:\n      - REJECT\n");
-    if !providers.is_empty() {
-        out.push_str("    use:\n");
-        for provider in providers {
-            out.push_str(&format!("      - provider-{}\n", provider.subscription_id));
+    // Hidden selectors used solely for latency tests. Each worker owns an
+    // independent selector so probes can switch and measure concurrently;
+    // none of them owns a listener or changes any user Slot route.
+    for worker in 0..LATENCY_PROBE_WORKERS {
+        let selector = latency_probe_selector(worker);
+        out.push_str(&format!(
+            "  - name: {selector}\n    type: select\n    proxies:\n      - REJECT\n"
+        ));
+        if !providers.is_empty() {
+            out.push_str("    use:\n");
+            for provider in providers {
+                out.push_str(&format!("      - provider-{}\n", provider.subscription_id));
+            }
         }
+        out.push_str("    default-selected: REJECT\n    empty-fallback: REJECT\n");
     }
-    out.push_str("    default-selected: REJECT\n    empty-fallback: REJECT\n");
     out.push_str("rules: []\n");
     Ok(out)
 }
+pub const LATENCY_PROBE_WORKERS: usize = 6;
+
+pub fn latency_probe_selector(worker: usize) -> String {
+    format!("node2socks-probe-{worker}")
+}
+
 fn yaml_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
