@@ -433,6 +433,12 @@ pub(crate) async fn start_core_inner(state: &ProductState) -> Result<u32, String
             interval_seconds: item.refresh_interval_sec,
         });
     }
+    // Refresh Mihomo provider caches explicitly after every Core start.
+    // Autonomous interval refresh is disabled to keep Slot bindings stable.
+    let provider_names: Vec<String> = providers
+        .iter()
+        .map(|provider| format!("provider-{}", provider.subscription_id))
+        .collect();
     let executable = resolve_sidecar()?;
     let runtime = database_path(state)?
         .parent()
@@ -444,6 +450,7 @@ pub(crate) async fn start_core_inner(state: &ProductState) -> Result<u32, String
     config.outbound_interface = crate::advanced_commands::desired_outbound_interface(state)?;
     let manager = Arc::new(MihomoManager::new(config).map_err(text)?);
     let health = manager.start().await.map_err(text)?;
+    refresh_core_providers(&manager, &provider_names).await;
     let pid = health.pid.ok_or_else(|| "Core PID 不可用".to_owned())?;
     let app = state.app_handle.lock().ok().and_then(|guard| guard.clone());
     let monitor =
@@ -461,6 +468,27 @@ pub(crate) async fn start_core_inner(state: &ProductState) -> Result<u32, String
     restore_slot_selectors(state, &manager).await;
     Ok(pid)
 }
+
+/// Refresh all configured HTTP providers once after Mihomo starts.
+/// A failure is logged while an existing cache remains available offline.
+async fn refresh_core_providers(manager: &Arc<MihomoManager>, provider_names: &[String]) {
+    if provider_names.is_empty() {
+        return;
+    }
+    let controller = match manager.controller().await {
+        Ok(controller) => controller,
+        Err(error) => {
+            tracing::warn!(%error, "failed to create controller for provider refresh");
+            return;
+        }
+    };
+    for provider in provider_names {
+        if let Err(error) = controller.refresh_provider(provider).await {
+            tracing::warn!(%provider, %error, "provider refresh after Core start failed");
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn stop_core(state: State<'_, ProductState>) -> Result<(), String> {
     stop_core_inner(&state).await
