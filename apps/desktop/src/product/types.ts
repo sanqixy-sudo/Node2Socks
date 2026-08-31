@@ -24,5 +24,5 @@ export type ActionResult<T>={ok:true;value:T;warning?:string}|{ok:false;error:st
 export type Action=<T>(label:string,run:()=>Promise<T>,options?:ActionOptions)=>Promise<ActionResult<T>>;
 export type SnapshotSection<T>={data?:T;error?:string};
 export type AppSnapshot={dashboard:SnapshotSection<Dashboard>;nodes:SnapshotSection<NodeView[]>;settings:SnapshotSection<AppSettings>;cloud:SnapshotSection<CloudStatus>};
-export const emptyDashboard:Dashboard={version:"0.1.0",coreRunning:false,localModeAvailable:true,subscriptions:[],slots:[],diagnostics:{core:"正在读取",clash:"正在读取",systemProxy:"正在读取",tun:"正在读取",outboundAdapter:"正在读取"}};
+export const emptyDashboard:Dashboard={version:"0.1.1",coreRunning:false,localModeAvailable:true,subscriptions:[],slots:[],diagnostics:{core:"正在读取",clash:"正在读取",systemProxy:"正在读取",tun:"正在读取",outboundAdapter:"正在读取"}};
 export const defaultSettings:AppSettings={theme:"system",density:"compact",sidebarCollapsed:false,portStart:21000,portEnd:21999,cooldownHours:24,startInTray:false,autoStartCore:true,outboundMode:"system",nodeGroupExpansion:{}};

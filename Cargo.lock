@@ -2481,7 +2481,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "node2socks-cloud"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "axum",
@@ -2501,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-cloud-sync"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.23.1",
  "node2socks-crypto",
@@ -2520,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-core-adapter"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "hex",
@@ -2539,7 +2539,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-crypto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "node2socks-cloud-sync",
  "node2socks-core-adapter",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-diagnostics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "node2socks-domain",
  "regex",
@@ -2597,7 +2597,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror 2.0.20",
@@ -2606,7 +2606,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-recovery"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "node2socks-domain",
  "node2socks-storage",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-runtime-service"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "node2socks-core-adapter",
@@ -2639,7 +2639,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-slot-manager"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "node2socks-domain",
  "node2socks-storage",
@@ -2651,7 +2651,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "node2socks-domain",
  "rusqlite",
@@ -2660,7 +2660,7 @@ dependencies = [
 
 [[package]]
 name = "node2socks-subscriptions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "base64 0.23.1",
