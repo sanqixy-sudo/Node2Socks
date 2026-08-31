@@ -1281,6 +1281,44 @@ pub async fn check_node(
     Ok(health)
 }
 
+const GITHUB_REPOSITORY_URL: &str = "https://github.com/sanqixy-sudo/Node2Socks";
+
+#[tauri::command]
+pub fn open_github() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+
+        let verb: Vec<u16> = OsStr::new("open").encode_wide().chain([0]).collect();
+        let url: Vec<u16> = OsStr::new(GITHUB_REPOSITORY_URL)
+            .encode_wide()
+            .chain([0])
+            .collect();
+        // ShellExecuteW delegates to the user's default browser without
+        // creating a second WebView or routing the URL through Mihomo.
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                url.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(format!("无法打开 GitHub（ShellExecuteW={result:?}）"));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("当前平台不支持打开系统浏览器".into())
+    }
+}
+
 #[tauri::command]
 pub fn data_directory(state: State<'_, ProductState>) -> Result<String, String> {
     Ok(commands::database_path(&state)?

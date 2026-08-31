@@ -737,6 +737,7 @@ pub fn run() {
             crate::advanced_commands::update_settings,
             crate::advanced_commands::data_directory,
             crate::advanced_commands::open_data_directory,
+            crate::advanced_commands::open_github,
             cloud_auth,
             cloud_devices,
             cloud_revoke_device,
