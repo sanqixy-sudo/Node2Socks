@@ -22,7 +22,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Download and verify pinned Mihomo sidecar
         shell: powershell
-        run: .scriptsprepare_sidecar.ps1
+        run: .\scripts\prepare_sidecar.ps1
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
