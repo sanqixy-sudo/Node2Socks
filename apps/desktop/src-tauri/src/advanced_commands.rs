@@ -4,7 +4,9 @@ use crate::{
 };
 use node2socks_domain::{DEFAULT_PORT_END, DEFAULT_PORT_START, ProxySlot, SlotBindingState};
 use node2socks_runtime_service::{HealthChecker, HealthResult};
-use node2socks_slot_manager::{PortAllocator, PortRange, SlotRepository, SystemPortProbe};
+use node2socks_slot_manager::{
+    PortAllocator, PortProbe, PortRange, SlotRepository, SystemPortProbe,
+};
 use node2socks_subscriptions::{CatalogNode, DownloadMode, SubscriptionRecord};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -458,6 +460,7 @@ pub async fn batch_create_slots(
     state: State<'_, ProductState>,
     node_ids: Vec<String>,
     name_prefix: Option<String>,
+    port: Option<u16>,
 ) -> Result<MutationResult<Vec<String>>, String> {
     if node_ids.is_empty() {
         return Err("请至少选择一个节点".into());
@@ -488,16 +491,49 @@ pub async fn batch_create_slots(
         SystemPortProbe,
     )
     .map_err(text)?;
+    if port.is_some() && node_ids.len() != 1 {
+        return Err("指定端口时只能选择一个节点".into());
+    }
+    let requested_port = port;
+    if let Some(port) = requested_port {
+        if port < settings.port_start || port > settings.port_end {
+            return Err(format!(
+                "端口必须在 {}-{} 范围内",
+                settings.port_start, settings.port_end
+            ));
+        }
+        if used.contains(&port) {
+            return Err(format!("端口 {} 已被其他 Slot 使用", port));
+        }
+        if !SystemPortProbe.is_available(port) {
+            return Err(format!("端口 {} 已被系统占用", port));
+        }
+        if cooldowns
+            .get(&port)
+            .and_then(|released| SystemTime::now().duration_since(*released).ok())
+            .is_some_and(|elapsed| elapsed < Duration::from_secs(settings.cooldown_hours * 3600))
+        {
+            return Err(format!("端口 {} 仍在冷却期内，请选择其他端口", port));
+        }
+    }
     let mut pending = Vec::new();
     for (index, node_id) in ids.into_iter().enumerate() {
-        let port = allocator
-            .allocate(&used, &cooldowns, SystemTime::now())
-            .map_err(text)?;
+        let port = requested_port.unwrap_or(
+            allocator
+                .allocate(&used, &cooldowns, SystemTime::now())
+                .map_err(text)?,
+        );
         used.insert(port);
         let name = name_prefix
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-            .map(|p| format!("{} {:02}", p.trim(), index + 1))
+            .map(|p| {
+                if node_ids.len() == 1 {
+                    p.trim().to_owned()
+                } else {
+                    format!("{} {:02}", p.trim(), index + 1)
+                }
+            })
             .unwrap_or_else(|| {
                 nodes
                     .iter()
