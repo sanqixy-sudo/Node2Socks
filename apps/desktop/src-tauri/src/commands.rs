@@ -170,6 +170,25 @@ pub(crate) async fn refresh_subscription_inner(
     id: Uuid,
     cancel: &CancellationToken,
 ) -> Result<usize, String> {
+    let mut changed = false;
+    let result = refresh_subscription_deferred(state, id, cancel, &mut changed).await;
+    let apply = apply_refreshed_subscriptions(state, changed).await;
+    match (result, apply) {
+        (Ok(count), Ok(())) => Ok(count),
+        (Err(error), Ok(())) => Err(error),
+        (_, Err(error)) => Err(format!("订阅数据已更新，但 Core 应用失败：{error}")),
+    }
+}
+
+/// Refresh and fail-close immediately, but defer expensive Core restart until
+/// the end of a multi-subscription operation. Mark changes before later effects
+/// (controller/outbox) can fail, so committed data is still applied.
+pub(crate) async fn refresh_subscription_deferred(
+    state: &ProductState,
+    id: Uuid,
+    cancel: &CancellationToken,
+    changed: &mut bool,
+) -> Result<usize, String> {
     let mut service =
         SubscriptionService::new(subscription_repository(state)?, state.bridge.clone(), 4)
             .map_err(text)?;
@@ -182,15 +201,28 @@ pub(crate) async fn refresh_subscription_inner(
         }));
     }
     let result = service.refresh(id, cancel).await.map_err(text)?;
+    *changed = true;
     if !result.diff.disappeared.is_empty() {
-        if let Some(manager) = state.core.lock().await.as_ref() {
-            let controller = manager.controller().await.map_err(text)?;
-            let repository = slot_repository(state)?;
-            let reconciler = SlotReconciler::new(repository, controller);
-            reconciler
-                .fail_closed_disappeared(&result.diff.disappeared.into_iter().collect())
-                .await
-                .map_err(text)?;
+        let manager = state.core.lock().await.clone();
+        if let Some(manager) = manager {
+            let blocked = async {
+                let controller = manager.controller().await.map_err(text)?;
+                let repository = slot_repository(state)?;
+                let reconciler = SlotReconciler::new(repository, controller);
+                reconciler
+                    .fail_closed_disappeared(&result.diff.disappeared.into_iter().collect())
+                    .await
+                    .map_err(text)
+            }
+            .await;
+            if let Err(error) = blocked {
+                // Never leave old outbound selectors alive throughout the rest
+                // of a batch if REJECT could not be confirmed.
+                stop_core_inner(state)
+                    .await
+                    .map_err(|stop| format!("节点安全阻断失败：{error}；停止 Core 失败：{stop}"))?;
+                return Err(format!("节点安全阻断未确认，Core 已停止：{error}"));
+            }
         } else {
             let disappeared: HashSet<_> = result.diff.disappeared.iter().copied().collect();
             let repository = slot_repository(state)?;
@@ -207,10 +239,17 @@ pub(crate) async fn refresh_subscription_inner(
         }
     }
     cloud_commands::enqueue_subscription(state, id).await?;
-    if state.core_running.load(Ordering::Relaxed) {
+    Ok(result.node_count)
+}
+
+pub(crate) async fn apply_refreshed_subscriptions(
+    state: &ProductState,
+    changed: bool,
+) -> Result<(), String> {
+    if changed && state.core_running.load(Ordering::Relaxed) {
         rebuild_core(state).await?;
     }
-    Ok(result.node_count)
+    Ok(())
 }
 #[tauri::command]
 pub fn list_nodes(state: State<'_, ProductState>) -> Result<Vec<CatalogNode>, String> {
@@ -692,8 +731,10 @@ fn resolve_sidecar() -> Result<PathBuf, String> {
 }
 
 #[tauri::command]
-pub fn list_network_adapters() -> Result<Vec<NetworkAdapter>, String> {
-    node2socks_diagnostics::inspect_windows()
+pub async fn list_network_adapters() -> Result<Vec<NetworkAdapter>, String> {
+    tauri::async_runtime::spawn_blocking(node2socks_diagnostics::inspect_windows)
+        .await
+        .map_err(text)?
         .map(|report| report.physical_adapters)
         .map_err(text)
 }

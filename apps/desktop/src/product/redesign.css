@@ -41,6 +41,7 @@
 .content-scroll::-webkit-scrollbar-track{background:transparent}
 .content-scroll::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:8px;border:2px solid transparent;background-clip:padding-box}
 .content{min-height:100%;padding-bottom:48px}
+.settings-fieldset{border:0;padding:0;margin:0;min-width:0;width:100%}
 .settings-layout{min-height:0}
 .settings-layout>div{min-width:0}
 .settings-layout>nav{z-index:2}
@@ -113,3 +114,6 @@ button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-vis
 .content{animation:page-in .18s ease-out}
 @keyframes page-in{from{opacity:0}to{opacity:1}}
 .subscription-toggle{display:flex;align-items:center;gap:7px}
+/* Keep the full searchable/keyboard-accessible list, but defer layout and paint
+   for cards outside the viewport. Chromium remembers their measured height. */
+.proxy-node-card{content-visibility:auto;contain-intrinsic-size:auto 130px}

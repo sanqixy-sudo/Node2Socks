@@ -130,6 +130,23 @@ pub async fn update_settings(
 ) -> Result<MutationResult<AppSettings>, String> {
     validate_settings(&settings)?;
     let before = load_settings(&state)?;
+    if network_settings_changed(&before, &settings) && settings.outbound_mode == "manual" {
+        let name = settings.outbound_interface.clone().unwrap_or_default();
+        let valid = tauri::async_runtime::spawn_blocking(move || {
+            node2socks_diagnostics::inspect_windows().map(|report| {
+                report
+                    .physical_adapters
+                    .into_iter()
+                    .any(|adapter| adapter.up && adapter.name == name)
+            })
+        })
+        .await
+        .map_err(text)?
+        .map_err(text)?;
+        if !valid {
+            return Err("指定网卡不存在或当前未连接".into());
+        }
+    }
     let values = [
         ("theme", serde_json::json!(settings.theme), "synced"),
         ("density", serde_json::json!(settings.density), "synced"),
@@ -235,6 +252,11 @@ pub(crate) fn load_settings(state: &ProductState) -> Result<AppSettings, String>
     Ok(result)
 }
 
+fn network_settings_changed(before: &AppSettings, after: &AppSettings) -> bool {
+    before.outbound_mode != after.outbound_mode
+        || before.outbound_interface != after.outbound_interface
+}
+
 fn validate_settings(value: &AppSettings) -> Result<(), String> {
     if !matches!(value.theme.as_str(), "system" | "light" | "dark") {
         return Err("主题设置无效".into());
@@ -252,19 +274,11 @@ fn validate_settings(value: &AppSettings) -> Result<(), String> {
         return Err("出站模式无效".into());
     }
     if value.outbound_mode == "manual" {
-        let name = value
+        value
             .outbound_interface
             .as_deref()
             .filter(|v| !v.trim().is_empty())
             .ok_or("手动出站模式必须选择网卡")?;
-        let valid = node2socks_diagnostics::inspect_windows()
-            .map_err(text)?
-            .physical_adapters
-            .into_iter()
-            .any(|a| a.up && a.name == name);
-        if !valid {
-            return Err("指定网卡不存在或当前未连接".into());
-        }
     }
     Ok(())
 }
@@ -410,6 +424,7 @@ pub async fn set_subscription_enabled(
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefreshSummary {
+    pub warning: Option<String>,
     pub succeeded: usize,
     pub failed: usize,
     pub skipped: usize,
@@ -433,14 +448,35 @@ pub async fn refresh_all_subscriptions(
         .map_err(text)?;
     let skipped = subscriptions.iter().filter(|item| !item.enabled).count();
     let mut summary = RefreshSummary {
+        warning: None,
         succeeded: 0,
         failed: 0,
         skipped,
         errors: Vec::new(),
     };
-    for item in subscriptions.into_iter().filter(|item| item.enabled) {
-        match commands::refresh_subscription_inner(&state, item.id, &CancellationToken::new()).await
-        {
+    let was_running = state.core_running.load(Ordering::Relaxed);
+    let cancel = CancellationToken::new();
+    let state_ref = &*state;
+    let cancel_ref = &cancel;
+    let (results, applied) = crate::refresh_batch::run(
+        subscriptions.into_iter().filter(|item| item.enabled),
+        &cancel,
+        |item| async move {
+            let mut changed = false;
+            let result = commands::refresh_subscription_deferred(
+                state_ref,
+                item.id,
+                cancel_ref,
+                &mut changed,
+            )
+            .await;
+            ((item, result), changed)
+        },
+        |changed| commands::apply_refreshed_subscriptions(state_ref, changed),
+    )
+    .await;
+    for (item, result) in results {
+        match result {
             Ok(_) => summary.succeeded += 1,
             Err(_) => {
                 summary.failed += 1;
@@ -451,6 +487,11 @@ pub async fn refresh_all_subscriptions(
                 });
             }
         }
+    }
+    if let Err(error) = applied {
+        summary.warning = Some(format!("订阅数据已保存，但 Core 应用失败：{error}"));
+    } else if was_running && !state.core_running.load(Ordering::Relaxed) {
+        summary.warning = Some("Core 已停止，请检查安全阻断或运行状态后重新启动".into());
     }
     Ok(summary)
 }
@@ -518,11 +559,11 @@ pub async fn batch_create_slots(
     }
     let mut pending = Vec::new();
     for (index, node_id) in ids.into_iter().enumerate() {
-        let port = requested_port.unwrap_or(
+        let port = resolve_slot_port(requested_port, || {
             allocator
                 .allocate(&used, &cooldowns, SystemTime::now())
-                .map_err(text)?,
-        );
+                .map_err(text)
+        })?;
         used.insert(port);
         let name = name_prefix
             .as_deref()
@@ -1095,6 +1136,18 @@ pub struct LatencyProgress {
     pub cancelled: bool,
 }
 
+fn publish_latency(app: &AppHandle, progress: LatencyProgress) {
+    if let Ok(mut current) = app.state::<ProductState>().latency_progress.lock() {
+        *current = Some(progress.clone());
+    }
+    let _ = app.emit("latency-progress", progress);
+}
+
+#[tauri::command]
+pub fn latency_status(state: State<'_, ProductState>) -> Result<Option<LatencyProgress>, String> {
+    Ok(state.latency_progress.lock().map_err(text)?.clone())
+}
+
 #[tauri::command]
 pub async fn start_latency_test(
     app: AppHandle,
@@ -1121,71 +1174,84 @@ pub async fn start_latency_test(
         return Err("所选节点中存在已消失节点".into());
     }
     state.core.lock().await.as_ref().ok_or("Core 尚未就绪")?;
+    let owner = state
+        .latency_owner
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "已有测速任务正在运行，请等待结束或取消")?;
+    let path = commands::database_path(&state)?;
     let job_id = Uuid::new_v4();
     let cancel = CancellationToken::new();
+    let total = nodes.len();
     state
         .latency_jobs
         .lock()
         .await
         .insert(job_id, cancel.clone());
-    let total = nodes.len();
-    let path = commands::database_path(&state)?;
-    let handle = app.clone();
+    let initial = LatencyProgress {
+        job_id: job_id.to_string(),
+        node_id: None,
+        completed: 0,
+        total,
+        done: false,
+        cancelled: false,
+    };
+    *state.latency_progress.lock().map_err(text)? = Some(initial.clone());
+    let _ = app.emit("latency-progress", initial);
     tauri::async_runtime::spawn(async move {
-        let mut completed = 0usize;
-        for chunk in nodes.chunks(LATENCY_CONCURRENCY) {
-            if cancel.is_cancelled() {
-                break;
-            }
-            let mut tasks = tokio::task::JoinSet::new();
-            for (worker, node) in chunk.iter().enumerate() {
-                let probe_app = app.clone();
-                let node_id = node.id;
-                let internal_name = node.internal_name.clone();
-                let child = cancel.child_token();
-                tasks.spawn(async move {
-                    tokio::select! {
-                        result = probe_node_latency_live(probe_app, worker, node_id, internal_name) => Some(result),
-                        _ = child.cancelled() => None,
-                    }
-                });
-            }
-            while let Some(joined) = tasks.join_next().await {
-                if let Ok(Some(result)) = joined {
-                    let _ = persist_latency(&path, &result);
-                    completed += 1;
-                    let _ = handle.emit(
-                        "latency-progress",
-                        LatencyProgress {
-                            job_id: job_id.to_string(),
-                            node_id: Some(result.node_id.to_string()),
-                            completed,
-                            total,
-                            done: false,
-                            cancelled: false,
-                        },
-                    );
+        let _owner = owner;
+        let mut completed = 0;
+        crate::latency_pool::run(
+            nodes,
+            LATENCY_CONCURRENCY,
+            &cancel,
+            |worker, node| {
+                probe_node_latency_live(app.clone(), worker, node.id, node.internal_name)
+            },
+            |result| {
+                let _ = persist_latency(&path, &result);
+                completed += 1;
+                publish_latency(
+                    &app,
+                    LatencyProgress {
+                        job_id: job_id.to_string(),
+                        node_id: Some(result.node_id.to_string()),
+                        completed,
+                        total,
+                        done: false,
+                        cancelled: false,
+                    },
+                );
+            },
+        )
+        .await;
+        // Aborting an in-flight future bypasses its normal selector cleanup.
+        if cancel.is_cancelled() {
+            if let Ok(controller) = current_controller(&app).await {
+                for worker in 0..LATENCY_CONCURRENCY {
+                    let selector =
+                        node2socks_core_adapter::provider::latency_probe_selector(worker);
+                    let _ = controller.select(&selector, "REJECT").await;
                 }
             }
         }
-        let cancelled = cancel.is_cancelled();
-        handle
-            .state::<ProductState>()
+        app.state::<ProductState>()
             .latency_jobs
             .lock()
             .await
             .remove(&job_id);
-        let _ = handle.emit(
-            "latency-progress",
+        publish_latency(
+            &app,
             LatencyProgress {
                 job_id: job_id.to_string(),
                 node_id: None,
                 completed,
                 total,
                 done: true,
-                cancelled,
+                cancelled: cancel.is_cancelled(),
             },
         );
+        crate::events::emit_snapshot_dirty(&app, "nodes");
     });
     Ok(LatencyJobView {
         job_id: job_id.to_string(),
@@ -1215,6 +1281,11 @@ pub async fn test_node_latency(
     state: State<'_, ProductState>,
     id: String,
 ) -> Result<NodeLatencyProbe, String> {
+    let _owner = state
+        .latency_owner
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "已有测速任务正在运行，请等待结束或取消")?;
     if !state.core_running.load(Ordering::Relaxed) {
         return Err("请先启动 Core".into());
     }
@@ -1245,6 +1316,11 @@ pub async fn test_node_latency(
 pub async fn test_all_node_latencies(
     state: State<'_, ProductState>,
 ) -> Result<Vec<NodeLatencyProbe>, String> {
+    let _owner = state
+        .latency_owner
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| "已有测速任务正在运行，请等待结束或取消")?;
     if !state.core_running.load(Ordering::Relaxed) {
         return Err("请先启动 Core".into());
     }
@@ -1262,20 +1338,14 @@ pub async fn test_all_node_latencies(
         .clone()
         .ok_or("应用尚未初始化")?;
     let mut results = Vec::with_capacity(nodes.len());
-    for chunk in nodes.chunks(LATENCY_CONCURRENCY) {
-        let mut tasks = tokio::task::JoinSet::new();
-        for (worker, node) in chunk.iter().enumerate() {
-            tasks.spawn(probe_node_latency_live(
-                app.clone(),
-                worker,
-                node.id,
-                node.internal_name.clone(),
-            ));
-        }
-        while let Some(result) = tasks.join_next().await {
-            results.push(result.map_err(text)?);
-        }
-    }
+    crate::latency_pool::run(
+        nodes,
+        LATENCY_CONCURRENCY,
+        &CancellationToken::new(),
+        |worker, node| probe_node_latency_live(app.clone(), worker, node.id, node.internal_name),
+        |result| results.push(result),
+    )
+    .await;
     let path = commands::database_path(&state)?;
     for result in &results {
         persist_latency(path.as_path(), result)?;
@@ -1570,6 +1640,16 @@ fn download_node_id_for(input: &SubscriptionInput) -> Result<Option<Uuid>, Strin
 fn clean(value: Option<String>) -> Option<String> {
     value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty())
 }
+fn resolve_slot_port(
+    requested: Option<u16>,
+    allocate: impl FnOnce() -> Result<u16, String>,
+) -> Result<u16, String> {
+    match requested {
+        Some(port) => Ok(port),
+        None => allocate(),
+    }
+}
+
 fn parse_id(value: &str) -> Result<Uuid, String> {
     Uuid::parse_str(value).map_err(text)
 }
@@ -1589,6 +1669,36 @@ fn text(error: impl std::fmt::Display) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_port_never_runs_automatic_allocation() {
+        assert_eq!(
+            resolve_slot_port(Some(21080), || panic!("must not scan ports")).unwrap(),
+            21080
+        );
+        assert_eq!(resolve_slot_port(None, || Ok(21001)).unwrap(), 21001);
+        assert_eq!(
+            resolve_slot_port(None, || Err("exhausted".into())).unwrap_err(),
+            "exhausted"
+        );
+    }
+
+    #[test]
+    fn appearance_changes_do_not_rescan_an_unchanged_manual_adapter() {
+        let before = AppSettings {
+            outbound_mode: "manual".into(),
+            outbound_interface: Some("Ethernet".into()),
+            ..AppSettings::default()
+        };
+        let mut after = before.clone();
+        after.theme = "dark".into();
+        assert!(validate_settings(&after).is_ok());
+        assert!(!network_settings_changed(&before, &after));
+        after.outbound_interface = Some("Ethernet 2".into());
+        assert!(network_settings_changed(&before, &after));
+        after.outbound_interface = None;
+        assert!(validate_settings(&after).is_err());
+    }
 
     fn catalog_node(subscription: Uuid, name: &str, present: bool) -> CatalogNode {
         CatalogNode {

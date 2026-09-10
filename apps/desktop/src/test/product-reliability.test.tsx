@@ -43,10 +43,11 @@ describe("reliable desktop interactions", () => {
   });
 
   it("submits only currently filtered nodes to latency testing", async () => {
-    invokeMock.mockResolvedValueOnce({ jobId: "job-1", total: 1 });
+    invokeMock.mockImplementation((command: string) => Promise.resolve(command === "latency_status" ? null : { jobId: "job-1", total: 1 }));
     const nodes = [node("node-a", "香港 A"), node("node-b", "日本 B")];
     render(<NodesPage data={dashboard({ coreRunning: true })} nodes={nodes} settings={defaultSettings} onSettings={() => {}} action={action} />);
     fireEvent.change(screen.getByPlaceholderText("搜索节点或订阅"), { target: { value: "日本" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "测速当前结果" })).not.toBeDisabled());
     fireEvent.click(screen.getByRole("button", { name: "测速当前结果" }));
     await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("start_latency_test", { nodeIds: ["node-b"] }));
   });

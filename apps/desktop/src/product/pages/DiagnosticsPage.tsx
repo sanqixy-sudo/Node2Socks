@@ -18,7 +18,7 @@ export function DiagnosticsPage({ data, action }: { data: Dashboard; action: Act
   };
   return <>
     <PageHeader title="诊断" description="检测 Node2Socks、Clash、系统代理和本地链路状态" actions={<>
-      <Button icon="refresh" onClick={() => void action("重新读取状态", () => invoke("dashboard_snapshot"), { reload: "dashboard" })}>重新检测</Button>
+      <Button icon="refresh" onClick={() => void action("提交后台检测", () => invoke("dashboard_snapshot", { refreshDiagnostics: true }), { reload: "none" })}>重新检测</Button>
       <Button icon="download" kind="primary" onClick={() => void exportReport()}>导出诊断</Button>
     </>} />
     <Section>

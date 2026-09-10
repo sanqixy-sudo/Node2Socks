@@ -58,6 +58,8 @@ pub struct ProductState {
     pub health_results: AsyncMutex<HashMap<uuid::Uuid, HealthResult>>,
     pub node_latency_results: AsyncMutex<HashMap<uuid::Uuid, NodeLatencyProbe>>,
     pub latency_jobs: AsyncMutex<HashMap<uuid::Uuid, CancellationToken>>,
+    pub latency_owner: Arc<AsyncMutex<()>>,
+    pub latency_progress: Mutex<Option<crate::advanced_commands::LatencyProgress>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -147,7 +149,7 @@ struct AppSnapshot {
 
 #[tauri::command]
 async fn app_snapshot(state: State<'_, ProductState>) -> Result<AppSnapshot, String> {
-    let dashboard = dashboard_snapshot(state.clone()).await;
+    let dashboard = dashboard_snapshot(state.clone(), None).await;
     let nodes = crate::advanced_commands::list_node_views(state.clone()).await;
     let settings = crate::advanced_commands::get_settings(state.clone());
     let cloud = cloud_status(state).await;
@@ -160,7 +162,10 @@ async fn app_snapshot(state: State<'_, ProductState>) -> Result<AppSnapshot, Str
 }
 
 #[tauri::command]
-async fn dashboard_snapshot(state: State<'_, ProductState>) -> Result<Dashboard, String> {
+async fn dashboard_snapshot(
+    state: State<'_, ProductState>,
+    refresh_diagnostics: Option<bool>,
+) -> Result<Dashboard, String> {
     let path = database_path(&state)?;
     let key = state
         .master_key
@@ -212,7 +217,14 @@ async fn dashboard_snapshot(state: State<'_, ProductState>) -> Result<Dashboard,
                     .and_then(|health| health.country.clone()),
             })
             .collect();
-    let report = inspect_windows().ok();
+    let report = crate::diagnostic_cache::snapshot(
+        state
+            .app_handle
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone(),
+        refresh_diagnostics.unwrap_or(false),
+    );
     let diagnostics = report
         .map(|value| DiagnosticSummary {
             core: if core_running {
@@ -240,11 +252,11 @@ async fn dashboard_snapshot(state: State<'_, ProductState>) -> Result<Dashboard,
                 "已停止"
             }
             .into(),
-            clash: "未检测".into(),
-            system_proxy: "未启用".into(),
-            tun: "未检测".into(),
-            outbound_adapter: "跟随系统路由".into(),
-            warning: None,
+            clash: "等待检测结果".into(),
+            system_proxy: "等待检测结果".into(),
+            tun: "等待检测结果".into(),
+            outbound_adapter: "等待检测结果".into(),
+            warning: Some("环境信息正在后台读取；若长时间未更新，可在诊断页重新检测。".into()),
         });
     Ok(Dashboard {
         version: env!("CARGO_PKG_VERSION"),
@@ -288,8 +300,13 @@ async fn restore_backup(state: State<'_, ProductState>, source: String) -> Resul
 }
 
 #[tauri::command]
-fn diagnostic_export(state: State<'_, ProductState>, destination: String) -> Result<(), String> {
-    let report = inspect_windows()
+async fn diagnostic_export(
+    state: State<'_, ProductState>,
+    destination: String,
+) -> Result<(), String> {
+    let report = tauri::async_runtime::spawn_blocking(inspect_windows)
+        .await
+        .map_err(text)?
         .map(|v| format!("{v:#?}"))
         .unwrap_or_else(|e| e.to_string());
     export_diagnostics(
@@ -570,6 +587,8 @@ pub fn run() {
             health_results: AsyncMutex::new(HashMap::new()),
             node_latency_results: AsyncMutex::new(HashMap::new()),
             latency_jobs: AsyncMutex::new(HashMap::new()),
+            latency_owner: Arc::new(AsyncMutex::new(())),
+            latency_progress: Mutex::new(None),
         })
         .setup(|app| {
             *app.state::<ProductState>()
@@ -664,13 +683,27 @@ pub fn run() {
                                 .map(|duration| duration.as_secs())
                                 .unwrap_or(0);
                             if let Ok(ids) = service.due(now) {
-                                for id in ids {
-                                    let state = app_handle.state::<ProductState>();
-                                    if let Err(error) = commands::refresh_subscription_inner(&state, id, &cancel).await {
+                                let state = app_handle.state::<ProductState>();
+                                let state_ref = &*state;
+                                let cancel_ref = &cancel;
+                                let (results, applied) = crate::refresh_batch::run(ids, &cancel,
+                                    |id| async move {
+                                        let mut changed = false;
+                                        let result = commands::refresh_subscription_deferred(state_ref, id, cancel_ref, &mut changed).await;
+                                        ((id, result), changed)
+                                    },
+                                    |changed| commands::apply_refreshed_subscriptions(state_ref, changed),
+                                ).await;
+                                let refreshed = !results.is_empty();
+                                for (id, result) in results {
+                                    if let Err(error) = result {
                                         tracing::warn!(%error, %id, "automatic subscription refresh failed");
                                     }
-                                    crate::events::emit_snapshot_dirty(&app_handle, "all");
                                 }
+                                if let Err(error) = applied {
+                                    tracing::warn!(%error, "automatic subscription Core apply failed");
+                                }
+                                if refreshed { crate::events::emit_snapshot_dirty(&app_handle, "all"); }
                             }
                         }
                     }
@@ -715,6 +748,7 @@ pub fn run() {
             commands::list_nodes,
             crate::advanced_commands::list_node_views,
             crate::advanced_commands::start_latency_test,
+            crate::advanced_commands::latency_status,
             crate::advanced_commands::cancel_latency_test,
             crate::advanced_commands::test_node_latency,
             crate::advanced_commands::test_all_node_latencies,
