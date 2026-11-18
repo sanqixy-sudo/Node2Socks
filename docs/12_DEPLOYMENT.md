@@ -8,6 +8,13 @@ cp examples/cloud/.env.example examples/cloud/.env
 docker compose --env-file examples/cloud/.env -f examples/cloud/docker-compose.yml up -d --build
 ```
 
+已发布的同步服务镜像可通过设置 `examples/cloud/.env` 中的 `NODE2SOCKS_CLOUD_IMAGE=ghcr.io/sanqixy-sudo/node2socks-cloud:0.1.3` 拉取。保留既有 JWT 密钥与数据目录。
+
+```bash
+docker compose --env-file examples/cloud/.env -f examples/cloud/docker-compose.yml pull
+docker compose --env-file examples/cloud/.env -f examples/cloud/docker-compose.yml up -d --no-build
+```
+
 健康检查：
 
 ```bash

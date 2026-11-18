@@ -14,4 +14,5 @@ USER node2socks
 VOLUME ["/data"]
 EXPOSE 8080
 ENV NODE2SOCKS_CLOUD_DATA=/data
+STOPSIGNAL SIGINT
 ENTRYPOINT ["/usr/local/bin/node2socks-cloud"]
