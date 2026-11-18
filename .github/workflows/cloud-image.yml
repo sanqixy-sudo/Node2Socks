@@ -1,0 +1,70 @@
+name: Node2Socks Cloud image
+
+on:
+  push:
+    tags: ['cloud-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify release version
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')"
+          if [[ "$GITHUB_REF_NAME" != "cloud-v$version" || ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Cloud release tag must be cloud-v followed by the Cargo workspace version."
+            exit 1
+          fi
+          echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}-cloud:$version" >> "$GITHUB_ENV"
+          echo "CLOUD_VERSION=$version" >> "$GITHUB_ENV"
+          echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - name: Build image and verify the health endpoint
+        run: |
+          set -euo pipefail
+          docker build --file services/cloud/Dockerfile \
+            --label "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$REVISION" \
+            --label "org.opencontainers.image.version=$GITHUB_REF_NAME" \
+            --tag "$IMAGE" .
+          container="$(docker run --detach --publish 127.0.0.1::8080 \
+            --env "NODE2SOCKS_CLOUD_JWT_SECRET=$(openssl rand -hex 24)" "$IMAGE")"
+          trap 'docker logs "$container"; docker rm -f "$container" >/dev/null' EXIT
+          address="$(docker port "$container" 8080/tcp)"
+          for ((attempt=1; attempt<=30; attempt++)); do
+            if [[ "$(docker inspect --format '{{.State.Running}}' "$container")" != true ]]; then
+              break
+            fi
+            if curl --fail --silent --max-time 5 "http://$address/api/v1/server-info" | jq -e --arg v "$CLOUD_VERSION" '.version == $v'; then
+              docker stop --time 10 "$container" >/dev/null
+              test "$(docker inspect --format '{{.State.ExitCode}}' "$container")" = 0
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Container did not become ready."
+          exit 1
+      - name: Publish and pull the versioned image
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout ghcr.io >/dev/null' EXIT
+          docker push "$IMAGE"
+          docker image rm "$IMAGE"
+          docker pull "$IMAGE"
+          revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE")"
+          test "$revision" = "$REVISION"
+          printf 'Published %s\n\n' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"
+          docker image inspect --format '{{join .RepoDigests "\n"}}' "$IMAGE" >> "$GITHUB_STEP_SUMMARY"

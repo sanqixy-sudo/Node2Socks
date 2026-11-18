@@ -1,5 +1,6 @@
 services:
   node2socks-cloud:
+    image: ${NODE2SOCKS_CLOUD_IMAGE:-node2socks-cloud:local}
     build:
       context: ../..
       dockerfile: services/cloud/Dockerfile

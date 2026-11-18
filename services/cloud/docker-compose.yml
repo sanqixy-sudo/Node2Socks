@@ -1,11 +1,14 @@
 services:
   node2socks-cloud:
+    image: ${NODE2SOCKS_CLOUD_IMAGE:-node2socks-cloud:local}
     build:
       context: ../..
       dockerfile: services/cloud/Dockerfile
     container_name: node2socks-cloud
     ports:
       - "127.0.0.1:18080:8080"
+    environment:
+      NODE2SOCKS_CLOUD_JWT_SECRET: "${NODE2SOCKS_CLOUD_JWT_SECRET:?set a random secret of at least 32 characters}"
     volumes:
       - ./data:/data
     restart: unless-stopped
